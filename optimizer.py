@@ -155,6 +155,8 @@ class Excel_Solver:
         write_solution_to_solver_range(idx) -> None:
             Write `x[idx]` to the Excel solver range.
         """
+        self._DIR = Path(__file__).parent
+        self._terminate_optimization = False  #flag to terminate optimization
         # xlwings objects
         self.xw = XW(book, sheet_name, [param_rg_name, algo_rg_name], ['rg_x', 'rg_algo'])
         
@@ -327,17 +329,20 @@ class Excel_Solver:
         float
             The value of the objective function read from the Excel sheet.
         """
+        if self._is_terminate(self._DIR):
+            self._terminate_optimization = True
+            return float(np.inf)
         # Pass active `x` to Excel solver range
         self.xw.app.calculation = 'manual'
         self._pass_x_to_solver(x)
         self.xw.app.calculate()
         self.xw.app.calculation = 'automatic'
         # read or evaluate objective
-        d = self._get_objective(objective_type)
-        if isinstance(d, dict):
-            f, error, penalty = d['f'], d['error'], d['penalty']
+        obj = self._get_objective(objective_type)
+        if isinstance(obj, dict):
+            f, error, penalty = obj['f'], obj['error'], obj['penalty']
         else:
-            f, error, penalty = d, None, None
+            f, error, penalty = obj, None, None
         self.solution['nfev'] += 1  #increment nfev counter
         # store solution
         eps = self.solution['storage_tol']
@@ -379,7 +384,7 @@ class Excel_Solver:
 
         return valid_params
     
-    def _solver_callback(self)->bool:
+    def _solver_callback(self, xk)->bool:
         """Callback function to stop the solver if a stopping condition is met.
 
         Parameters
@@ -393,6 +398,7 @@ class Excel_Solver:
             True if the optimization should terminate, False otherwise.
         """
         # Check for external termination signal
+        print("Entered callback", f"xk={xk}")
         if self._is_terminate():
             print("Termination signal detected. Stopping optimization.")
             return True
@@ -410,7 +416,71 @@ class Excel_Solver:
             file_dir = Path(__file__).parent
         return (file_dir / check_file).exists()
 
-    def optimize(self, method:str=None, args=(), **kwargs) -> OptimizeResult:
+    def _optimize_args(self, method:str, opt_kwargs:dict)->tuple[str, dict]:
+        """handle `opt_args` input."""
+        # handle `method` input
+        if method is not None:
+            self.algo_param['method'] = method
+        method = self.algo_param['method'].lower()
+        
+        # TODO This needs to be handled differently. Should not try to build `kwargs`, rather allow user full control of the definition of `kwargs`. 
+        # There are too many details to handle to make this method work with all the different optimization algorithms. Give the user a method for getting the default `kwargs` for a 
+        # particular method and then they can modify those `kwargs` how they see fit and then deal with any errors thrown by the optimization algorithms.
+        if not opt_kwargs:
+            opt_kwargs = self.algo_param['param'] # algorithm parameters
+        else:
+            opt_kwargs.update(self.algo_param['param'])  # Combine with additional kwargs, if any
+        local_minimizer= opt_kwargs.get('local_minimizer', None)
+        bounds = opt_kwargs.get('bounds', None)
+        opt_kwargs = self._filter_kwargs(method, opt_kwargs)
+            
+        # handle `minimizer_kwargs` if a key in `kwargs`
+        if 'minimizer_kwargs' in opt_kwargs:
+            minimizer_kwargs = self._OPT_KWARGS['minimize']
+            minimizer_kwargs.pop('x0', None)
+            minimizer_kwargs['method'] = local_minimizer
+            minimizer_kwargs['bounds'] = bounds
+            if opt_kwargs['minimizer_kwargs'] is not None:
+                minimizer_kwargs.update(opt_kwargs.pop('minimizer_kwargs', {}))
+            opt_kwargs['minimizer_kwargs'] = minimizer_kwargs
+        
+        if 'x0' in opt_kwargs:
+            opt_kwargs['x0'] = self.x_param.get('val', np.ones(len(bounds), dtype=float))
+
+        # add callback to `kwargs` (allows user to stop optimization early)
+        if opt_kwargs['callback'] is None:
+            opt_kwargs['callback'] = None #self._solver_callback       
+            
+        return method, opt_kwargs
+    
+    def _optimize_run(self, method:str, args=(), **opt_kwargs:dict)->OptimizeResult:
+        """handle `opt_args` input."""
+        try:
+            if method == 'differential_evolution':
+                result = differential_evolution(self._objective_function, args=args, **opt_kwargs)
+            elif method == 'basinhopping':
+                result = basinhopping(self._objective_function, **opt_kwargs)
+            elif method == 'brute':
+                result = brute(self._objective_function, args=args, **opt_kwargs)
+            elif method == 'shgo':
+                if opt_kwargs['minimizer_kwargs']['method'] is None:
+                    opt_kwargs['minimizer_kwargs']['method'] = 'SLSQP'
+                result = shgo(self._objective_function, args=args, **opt_kwargs)
+            elif method == 'dual_annealing':
+                result = dual_annealing(self._objective_function, args=args, **opt_kwargs)
+            elif method == 'direct':
+                result = direct(self._objective_function, args=args, **opt_kwargs)  
+            else: # Assuming the default case is a local minimizer
+                result = minimize(self._objective_function, args=args, **opt_kwargs)
+        except Exception as e:
+            result = None
+            if self._terminate_optimization:
+                print("Optimization terminated by stop file!")
+            else:
+                raise e
+        return result
+            
+    def optimize(self, method:str=None, args=(), **opt_kwargs) -> OptimizeResult:
         """
         Optimizes the parameters specified in the Excel 'pySolve_Param' range using
         the optimization algorithm specified in the Excel 'pySolve_Settings' range.
@@ -429,7 +499,7 @@ class Excel_Solver:
             a stochastic global optimization algorithm.
         args : tuple, optional
             Additional arguments to be passed to the objective function.
-        **kwargs
+        **opt_kwargs
             Additional keyword arguments to be passed to the optimization function.
             For 'basinhopping', you can pass 'minimizer_kwargs' as a dictionary
             to specify arguments for the underlying local optimization method.
@@ -449,67 +519,51 @@ class Excel_Solver:
         >>> solver.optimize(method='basinhopping')
         >>> solver.close_excel()
         """
-        # handle `method` input
-        if method is not None:
-            self.algo_param['method'] = method
-        method = self.algo_param['method'].lower()
-        
-        # handle `kwargs` input
-        # TODO This needs to be handled differently. Should not try to build `kwargs`, rather allow user full control of the definition of `kwargs`. 
-        # There are too many details to handle to make this method work with all the different optimization algorithms. Give the user a method for getting the default `kwargs` for a 
-        # particular method and then they can modify those `kwargs` how they see fit and then deal with any errors thrown by the optimization algorithms.
-        if not kwargs:
-            kwargs = self.algo_param['param'] # algorithm parameters
-        else:
-            kwargs.update(self.algo_param['param'])  # Combine with additional kwargs, if any
-        local_minimizer= kwargs.get('local_minimizer', None)
-        bounds = kwargs.get('bounds', None)
-        kwargs = self._filter_kwargs(method, kwargs)
-            
-        # handle `minimizer_kwargs` if a key in `kwargs`
-        if 'minimizer_kwargs' in kwargs:
-            minimizer_kwargs = self._OPT_KWARGS['minimize']
-            minimizer_kwargs.pop('x0', None)
-            minimizer_kwargs['method'] = local_minimizer
-            minimizer_kwargs['bounds'] = bounds
-            if kwargs['minimizer_kwargs'] is not None:
-                minimizer_kwargs.update(kwargs.pop('minimizer_kwargs', {}))
-            kwargs['minimizer_kwargs'] = minimizer_kwargs
-        
-        if 'x0' in kwargs:
-            kwargs['x0'] = self.x_param.get('val', np.ones(len(bounds), dtype=float))
-            
-        # add callback to `kwargs` (allows user to stop optimization early)
-        if kwargs['callback'] is None:
-            kwargs['callback'] = None #self._solver_callback       
+        # get optimization method and kwargs
+        method, opt_kwargs = self._optimize_args(method, opt_kwargs)    
         
         # modify EXCEL app
-        self.xw.app.screen_updating = False
+        #self.xw.app.screen_updating = False
         
         # run optimizer
         args = ('default', True) #objective_type, write_to_list
-        if method == 'differential_evolution':
-            result = differential_evolution(self._objective_function, args=args, **kwargs)
-        elif method == 'basinhopping':
-            result = basinhopping(self._objective_function, **kwargs)
-        elif method == 'brute':
-            result = brute(self._objective_function, args=args, **kwargs)
-        elif method == 'shgo':
-            if kwargs['minimizer_kwargs']['method'] is None:
-                kwargs['minimizer_kwargs']['method'] = 'SLSQP'
-            result = shgo(self._objective_function, args=args, **kwargs)
-        elif method == 'dual_annealing':
-            result = dual_annealing(self._objective_function, args=args, **kwargs)
-        elif method == 'direct':
-            result = direct(self._objective_function, args=args, **kwargs)  
-        else: # Assuming the default case is a local minimizer
-            result = minimize(self._objective_function, args=args, **kwargs)
-
+        try:
+            if method == 'differential_evolution':
+                result = differential_evolution(self._objective_function, args=args, **opt_kwargs)
+            elif method == 'basinhopping':
+                result = basinhopping(self._objective_function, **opt_kwargs)
+            elif method == 'brute':
+                result = brute(self._objective_function, args=args, **opt_kwargs)
+            elif method == 'shgo':
+                if opt_kwargs['minimizer_kwargs']['method'] is None:
+                    opt_kwargs['minimizer_kwargs']['method'] = 'SLSQP'
+                result = shgo(self._objective_function, args=args, **opt_kwargs)
+            elif method == 'dual_annealing':
+                result = dual_annealing(self._objective_function, args=args, **opt_kwargs)
+            elif method == 'direct':
+                result = direct(self._objective_function, args=args, **opt_kwargs)  
+            else: # Assuming the default case is a local minimizer
+                result = minimize(self._objective_function, args=args, **opt_kwargs)
+        except Exception as e:
+            result = None
+            if self._terminate_optimization:
+                print("Optimization terminated by stop file!")
+            else:
+                raise e
+            
         # modify EXCEL app
-        self.xw.app.screen_updating = True
+        #self.xw.app.screen_updating = True
         
         # Update the optimized values in the Excel sheet
-        self._objective_function(result.x, *args)
+        if result is None:
+            if len(self.solution['f']) > 0:
+                f_min = min(self.solution['f'])
+                x = self.solution['x'][self.solution['f'].index(f_min)]
+            else:
+                x = opt_kwargs['x0']
+        else:
+            x = result.x
+        self._objective_function(x, *args)
         self.solution['result'] = result
         return result
     
@@ -568,30 +622,35 @@ class Excel_Solver:
         info = f"This sheet was created by the script `{script_name}` using the `Excel_Solver.print_solutions()` method."
         result = self.solution['result']
         data_to_write = [
-            ["info:", info],
-            ["problem:", "minimize(f(x)), where `x` is the set of active parameters and `f` is the objective."],
-            ["book:" f"{self.xw.book.name}"],
-            ["sheet:", f"{self.xw.sheet.name}"],
-            [""],
-            ["", "objective", "error", "parameters (all)"],
-            ["", "f(x)", "err(x)"] + self._x_dict_all["param"],
-            ["initial:", self._x_dict_all["obj"][0], self._x_dict_all["obj"][1]] + self._x_dict_all["val"],
-            ["min:", "", "", self._x_dict_all["min"]],
-            ["max:", "", "", self._x_dict_all["max"]],
-            [""],
-            ["", "objective", "error", "parameters (active)"],
-            ["", "f(x)", "err(x)"] + self.x_param['param'],
-            ["initial:", self._x_dict_all["obj"][0], self._x_dict_all["obj"][1]] + self.x_param['val'],
-            ["final:", result.fun, ""] + result.x.tolist(),
-            [""],
-            ["optimizer algorithm / hyperparameters / results"],
-            ["algo_method:", self.algo_param['method']],
-            ["algo_param:"] + [f"{key}={val}" for key, val in self.algo_param['param'].items()],
-            ["success:", result.success],
-            ["message:", result.message],
-            ["nfev:", result.nfev],
-            ["nit:", result.nit]
+                ["info:", info],
+                ["problem:", "minimize(f(x)), where `x` is the set of active parameters and `f` is the objective."],
+                ["book:", f"{self.xw.book.name}"],
+                ["sheet:", f"{self.xw.sheet.name}"],
+                [""],
+                ["", "objective", "error", "parameters (all)"],
+                ["", "f(x)", "err(x)"] + self._x_dict_all["param"],
+                ["initial:", self._x_dict_all["obj"][0], self._x_dict_all["obj"][1]] + self._x_dict_all["val"],
+                ["min:", "", ""] + self._x_dict_all["min"],
+                ["max:", "", ""] + self._x_dict_all["max"],
+                [""],
+                ["", "objective", "error", "parameters (active)"],
+                ["", "f(x)", "err(x)"] + self.x_param['param'],
+                ["initial:", self._x_dict_all["obj"][0], self._x_dict_all["obj"][1]] + self.x_param['val'],
         ]
+        if result is None:
+            data_to_write.append(["optimization failed!"])
+        else:
+            data_to_write.append([
+                ["final:", result.fun, ""] + result.x.tolist(),
+                [""],
+                ["optimizer algorithm / hyperparameters / results"],
+                ["algo_method:", self.algo_param['method']],
+                ["algo_param:"] + [f"{key}={val}" for key, val in self.algo_param['param'].items()],
+                ["success:", result.success],
+                ["message:", result.message],
+                ["nfev:", result.nfev],
+                ["nit:", result.nit]
+            ])
 
         # Writing data to Excel using a loop
         self.xw.app.screen_updating = False
@@ -609,8 +668,8 @@ class Excel_Solver:
             sheet.range(f"A{r+3}").value = ["", "", ""] + self.x_param['indices']
             sheet.range(f"A{r+4}").value = ["", "f(x)", "err(x)"] + self.x_param['param']
             for i, (f, e, x) in enumerate(zip(sol['f'], sol['error'], sol['x'])):
+                sheet.range(f"A{r+5}").value = [i, f, e] + x.tolist()
                 r += 1
-                sheet.range(f"A{r+4}").value = [i, f, e] + x.tolist()
         self.xw.app.screen_updating = True
         
         # Apply `kwargs`
@@ -654,7 +713,7 @@ def main(book_path:Path, **kwargs):
 
     # print candidate solutions to sheet
     solver.print_solutions(sheet_name=kwargs.get("solution_sheet"))
-    print(result)
+    print(f"optimization result: {result}")
     
 if __name__ == "__main__":
     
