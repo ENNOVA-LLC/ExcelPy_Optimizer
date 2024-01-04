@@ -1,0 +1,15 @@
+name: optimization-env
+channels:
+  - defaults
+dependencies:
+  - python=3.11  # or any version you prefer
+  - numpy
+  - scipy
+  - scikit-learn
+  - pandas
+  - xlwings
+  - jupyter
+  - ipython
+  - matplotlib
+  - seaborn
+  - numba
