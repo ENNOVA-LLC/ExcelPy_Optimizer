@@ -1,2 +1,2 @@
-Signal to `optimizer.py/Excel_Solver.optimize` method to STOP the optimization.
+Signal to `optimizer.py/Excel_Solver.optimize()` method to STOP the optimization.
 Move this file to the same directory as `optimizer.py` to STOP the optimization and finish the remainder of the script.

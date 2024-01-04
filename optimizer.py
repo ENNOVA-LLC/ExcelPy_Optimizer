@@ -32,6 +32,50 @@ import numpy as np
 from scipy.optimize import minimize, basinhopping, brute, differential_evolution, shgo, dual_annealing, direct
 from scipy.optimize import OptimizeResult, show_options
 from utils.file_excel import get_book, get_sheet, get_range, rg_to_dict
+
+class XW:
+    """
+    xlwings convenience class.
+
+    This class provides a simplified interface for working with Excel files using the xlwings library.
+    """
+    
+    def __init__(self, book, sheet_name:str, ranges:list[str], attr_names:list[str])->None:
+        """
+        Initializes a new instance of the `XW` class.
+
+        Parameters
+        ----------
+        book : str or Path
+            Path to the Excel file.
+        sheet_name : str
+            Name of the sheet.
+        ranges : list[str]
+            A list of range names.
+        attr_names : list[str], optional
+            A list of attribute names.
+
+        Attributes
+        ----------
+        app : xw.app
+            Excel application object
+        book : xw.Book
+            Excel Workbook object
+        sheet : xw.Sheet
+            Excel Worksheet object
+        ranges : dict[xw.Range]
+            dict containing `xw.Range` objects
+        """
+        self.book = get_book(book)
+        self.app = self.book.app
+        self.sheet = get_sheet(self.book, sheet_name)
+        self.ranges = {}
+        if attr_names is not None and len(ranges) == len(attr_names):
+            for rg, attr_name in zip(ranges, attr_names):
+                self.ranges[attr_name] = get_range(self.sheet, rg_name=rg, isValue=False)
+        else:
+            for rg in ranges:
+                self.ranges[rg] = get_range(self.sheet, rg_name=rg, isValue=False)
     
 class Excel_Solver:
     """ 
@@ -74,7 +118,7 @@ class Excel_Solver:
         }
     
     def __init__(self, book:Path, sheet_name:str="project", param_rg_name:str="pySolve_Param", algo_rg_name:str="pySolve_Algo",
-                 objective_dict:dict={}):
+                 objective_dict:dict={})->None:
         """
         Initializes an instance of the class.
 
@@ -91,51 +135,61 @@ class Excel_Solver:
         objective_dict : dict, optional
             The objective function dictionary, keys('sheet', 'rg'). Defaults to None.
             
-        Returns
+        Attributes
+        ----------
+        xw : XW class instance
+            Contains attributes {book, sheet, ranges}
+        x_param : dict {keys: 'val', 'min', 'max'}
+            Active `x` parameters.
+        algo_param : dict
+            Hyperparameters for the optimization algorithm
+        solution : dict
+            Contains results from the optimization.
+        
+        Methods
         -------
-            None
+        optimize() -> Result
+            Performs the optimization as specified on the Excel sheet.
+        print_solutions() -> None
+            Writes `self.solution` info to an Excel sheet.
+        write_solution_to_solver_range(idx) -> None:
+            Write `x[idx]` to the Excel solver range.
         """
         # xlwings objects
-        self._xw_book = get_book(book)
-        self._xw_app = self._xw_book.app
-        self._xw_sheet = get_sheet(self._xw_book, sheet_name=sheet_name)
-        self._xw_rg_x = get_range(self._xw_sheet, rg_name=param_rg_name, isValue=False)
-        self._xw_rg_algo = get_range(self._xw_sheet, rg_name=algo_rg_name)
+        self.xw = XW(book, sheet_name, [param_rg_name, algo_rg_name], ['rg_x', 'rg_algo'])
         
         # x (model parameters)
-        self._x_dict_all = self._x_rg_to_dict(self._xw_rg_x)
+        self._x_dict_all = self._x_rg_to_dict(self.xw.ranges['rg_x'])
         self.x_param = self._read_x_active(self._x_dict_all)
         if len(self.x_param['val'])==0:
             raise ValueError("No active parameters found in the `param_rg_name` range.")
         
         # outputs from `self.optimize()` method
-        self.solution = dict(result=None, f=[], x=[], tol=None)   # storage for solutions (result, f(x), x)
+        self.solution = dict(result=None, nfev=0, 
+                             f=[], x=[], error=[], penalty=[], storage_tol=None)   # storage for solutions (result, f(x), x)
         
         # algo (algorithm parameters / hyperparameters)
         self.algo_param = dict(method=None, param=None, objective='default')
         if algo_rg_name is not None:
-            algo_params = self._x_rg_to_dict(self._xw_rg_algo)
+            algo_params = self._x_rg_to_dict(self.xw.ranges['rg_algo'])
             self.algo_param['method'], self.algo_param['param'] = self._read_algo_params(algo_params)
             self.algo_param['objective'] = self.algo_param['param'].pop('objective', 'default')
             # add `param_x` to `algo['param']`
             self.algo_param['param']['x0'] = self.x_param.get('val', None)          # `x0`, init guess
             self.algo_param['param']['bounds'] = self.x_param.pop('bounds', None)   # bounds on `x`
             self.algo_param['param']['ranges'] = self.x_param.pop('bounds', None)   # bounds on `x` -- for `scipy.optimize.brute()`
-            self.solution['tol'] = self.algo_param['param'].pop('storage_tol', None)
+            self.solution['storage_tol'] = self.algo_param['param'].pop('storage_tol', None)
             # self.param_algo['param'] = self._filter_kwargs(self.param_algo['method'], self.param_algo['param'])
             
         # f(x), custom objective
-        self.f_custom = dict(sheet=None, rg=None)
-        if objective_dict:
-            self.f_custom['sheet'] = get_sheet(self._xw_book, sheet_name=objective_dict['sheet'])
-            self.f_custom['rg'] = get_range(self.f_custom['sheet'], rg_name=objective_dict['rg'])
+        self.xw_f_custom = XW(book, objective_dict['sheet'], [objective_dict['rg']], ['rg']) if objective_dict else None
     
     # INIT auxiliary methods
     def _x_rg_to_dict(self, rg:xw.Range) -> dict:
         """Convenience method to convert "Param" range object to dict."""
         return rg_to_dict(rg, isRowHeader=False, isUnit=False, isTrimNone=False, isLowerCaseKey=False)
 
-    def _read_x_active(self, d:dict):
+    def _read_x_active(self, d:dict)->dict:
         """
         Filters the dictionary to include only entries where 'active?' is 'Y'.
 
@@ -154,14 +208,14 @@ class Excel_Solver:
         def del_keys(d:dict, keys:list):
             for key in keys:
                 d.pop(key, None)
-        
+
         # Iterate over each entry and add active parameters to `d_active`
-        d_active = {key: [] for key in d.keys()}
+        d_active = {key: [] for key in d}
         d_active['indices'] = []    # Add the 'indices' key
         d_active['bounds'] = []     # Add the 'bounds' key
         for i, isActive in enumerate(d['active?']):
             if isActive == 'Y':
-                for key in d.keys():
+                for key in d:
                     d_active[key].append(d[key][i])
                 d_active['indices'].append(i)
                 d_active['bounds'].append((d['min'][i], d['max'][i]))
@@ -174,10 +228,10 @@ class Excel_Solver:
         if method is None:
             d = self.algo_param['param']
         else:
-            d = self._OPT_KWARGS.get(method, None)
+            d = self._OPT_KWARGS.get(method)
         return d.copy()
 
-    def set_algo_params(self, method:str=None, param:dict=None):
+    def set_algo_params(self, method:str=None, param:dict=None)->None:
         """Modifies the `param_algo` dict which is used by the `optimize()` method.
         
         Parameters
@@ -194,7 +248,7 @@ class Excel_Solver:
         self.algo_param['method'] = method
         self.algo_param['param'] = param
     
-    def _read_algo_params(self, algo_params):
+    def _read_algo_params(self, algo_params)->tuple[str, dict]:
         """
         Reads the algorithm parameters from the Excel sheet and stores them in a dictionary.
 
@@ -206,12 +260,13 @@ class Excel_Solver:
         def get_val(d:dict, key:str):
             """Extracts the value from d[key] and converts its type."""
             value = d[key]
-            if isinstance(value, str) and value.isdigit():
-                return int(value)
-            elif isinstance(value, str) and self._is_float(value):
-                return float(value)
+            if isinstance(value, str):
+                if value.isdigit():
+                    return int(value)
+                elif self._is_float(value):
+                    return float(value)
             return value
-            
+
         # read `rg` and populate `algo_param`
         algo_param = {}
         row = 1
@@ -225,7 +280,7 @@ class Excel_Solver:
         algo_param.update(self._OPT_KWARGS[algo_method])
         return algo_method, algo_param
 
-    def _is_float(self, s:str):
+    def _is_float(self, s:str)->bool:
         """Helper method to check if a string can be converted to a float."""
         try:
             float(s)
@@ -234,7 +289,7 @@ class Excel_Solver:
             return False
     
     # OPTIMIZATION methods
-    def _pass_x_to_solver(self, x):
+    def _pass_x_to_solver(self, x)->None:
         """Passes the current values of the optimization parameters to the Excel sheet.
 
         Parameters
@@ -244,20 +299,22 @@ class Excel_Solver:
         """
         s = self._SOLVER_MAP
         for i, xi in zip(self.x_param['indices'], x):
-            self._xw_rg_x(s['val'], i+2).value = xi
+            self.xw.ranges['rg_x'](s['val'], i+2).value = xi
     
-    def _get_objective(self, objective_type:str):
+    def _get_objective(self, objective_type:str)->dict or float:
         """Read value from objective cell."""
         s = self._SOLVER_MAP
         if objective_type == 'default':
-            return self._xw_rg_x(s['obj'], 2).value  # Assuming the objective value is in col=1
+            f = self.xw.ranges['rg_x'].value[s['obj']-1]
+            c = 1 # Assuming the objective value is in col=1
+            return dict(f=f[c], error=f[c+1], penalty=f[c+2]) 
         else:
             # read x, y, y*
             data = self.rg_obj
             # gpt: read {x,y,y*} from `data`
             # set 1 is in col{x=1,y=2,y*=3}, 2 is in col{x=4,y=5,y*=6} and so on. 
             
-    def _objective_function(self, x, objective_type="default", write_to_storage=True):
+    def _objective_function(self, x, objective_type="default", write_to_storage=True)->float:
         """Reads value of objective from `Solve_Knobs` range.
 
         Parameters
@@ -270,19 +327,28 @@ class Excel_Solver:
         float
             The value of the objective function read from the Excel sheet.
         """
-        # Update the parameter values in Excel based on active parameter indices
-        self._xw_app.calculation = 'manual'
+        # Pass active `x` to Excel solver range
+        self.xw.app.calculation = 'manual'
         self._pass_x_to_solver(x)
-        self._xw_app.calculate()
-        self._xw_app.calculation = 'automatic'
-        f = self._get_objective(objective_type)
-        if write_to_storage and isinstance(self.solution['tol'], float):
-            if f < self.solution['tol']:
-                self.solution['f'].append(f)
-                self.solution['x'].append(x)
+        self.xw.app.calculate()
+        self.xw.app.calculation = 'automatic'
+        # read or evaluate objective
+        d = self._get_objective(objective_type)
+        if isinstance(d, dict):
+            f, error, penalty = d['f'], d['error'], d['penalty']
+        else:
+            f, error, penalty = d, None, None
+        self.solution['nfev'] += 1  #increment nfev counter
+        # store solution
+        eps = self.solution['storage_tol']
+        if write_to_storage and eps is not None and (f < eps or error < eps):
+            self.solution['f'].append(f)
+            self.solution['error'].append(error)
+            self.solution['penalty'].append(penalty)
+            self.solution['x'].append(x)
         return f
 
-    def _filter_kwargs(self, method, kwargs):
+    def _filter_kwargs(self, method:str, kwargs:dict)->dict:
         """
         Filters keyword arguments to include only those that are valid for the given method.
 
@@ -306,12 +372,14 @@ class Excel_Solver:
             if key in valid_params and not isinstance(valid_params[key], int):
                 try:
                     valid_params[key] = int(valid_params[key])
-                except ValueError:
-                    raise ValueError(f"Value for '{key}' must be an integer. Got '{valid_params[key]}'.")
+                except ValueError as e:
+                    raise ValueError(
+                        f"Value for '{key}' must be an integer. Got '{valid_params[key]}'."
+                    ) from e
 
         return valid_params
     
-    def _solver_callback(self):
+    def _solver_callback(self)->bool:
         """Callback function to stop the solver if a stopping condition is met.
 
         Parameters
@@ -325,7 +393,7 @@ class Excel_Solver:
             True if the optimization should terminate, False otherwise.
         """
         # Check for external termination signal
-        if self._check_termination_signal():
+        if self._is_terminate():
             print("Termination signal detected. Stopping optimization.")
             return True
         
@@ -335,7 +403,7 @@ class Excel_Solver:
         #     return True
         return False
 
-    def _check_termination_signal(self, file_dir:Path=None, check_file="stop_optimizer.txt"):
+    def _is_terminate(self, file_dir:Path=None, check_file="stop_optimizer.txt")->bool:
         """Check for a specific condition or signal to terminate the optimization."""
         # Get the directory of this file and check for the existence of the 'check_file' file
         if file_dir is None:
@@ -416,7 +484,7 @@ class Excel_Solver:
             kwargs['callback'] = None #self._solver_callback       
         
         # modify EXCEL app
-        self._xw_app.screen_updating = False
+        self.xw.app.screen_updating = False
         
         # run optimizer
         args = ('default', True) #objective_type, write_to_list
@@ -438,14 +506,29 @@ class Excel_Solver:
             result = minimize(self._objective_function, args=args, **kwargs)
 
         # modify EXCEL app
-        self._xw_app.screen_updating = True
+        self.xw.app.screen_updating = True
         
         # Update the optimized values in the Excel sheet
         self._objective_function(result.x, *args)
         self.solution['result'] = result
         return result
     
-    def print_solutions(self, sheet_name="Solutions", **kwargs):
+    def write_solution_to_solver_range(self, idx:int)->None:
+        """Write x[idx] to the Excel solver range.
+        
+        Parameters
+        ----------
+        idx : int
+            idx of the `solution['x']` attribute to print to Excel range.
+        """
+        # extract solution from `idx`
+        f = self.solution['f'][idx]
+        x = self.solution['x'][idx]
+        
+        # write `x` to solver range
+        self._pass_x_to_solver(x)
+
+    def print_solutions(self, sheet_name="Solutions", **kwargs)->None:
         """
         Writes the candidate solutions and their corresponding objective values to a new Excel sheet.
 
@@ -458,10 +541,6 @@ class Excel_Solver:
         sheet_name : str, optional
             The name of the Excel sheet where the solutions will be written. If a sheet with the given name
             already exists, it will be overwritten. The default name is "Solutions".
-
-        Returns
-        -------
-        None
 
         Notes
         -----
@@ -478,9 +557,9 @@ class Excel_Solver:
         >>> solver.print_solutions(sheet_name="Optimization Results")
         """
         # Create a new Excel sheet for the solutions (delete the sheet if it already exists)
-        if sheet_name in [s.name for s in self._xw_book.sheets]:
-            self._xw_book.sheets[sheet_name].delete()
-        sheet = self._xw_book.sheets.add(name=sheet_name)
+        if sheet_name in [s.name for s in self.xw.book.sheets]:
+            self.xw.book.sheets[sheet_name].delete()
+        sheet = self.xw.book.sheets.add(name=sheet_name)
         
         # Write the (info, initial, final, `result` object) to sheet
         # initial: initial values of the FULL parameter set (including inactive parameters)
@@ -490,14 +569,22 @@ class Excel_Solver:
         result = self.solution['result']
         data_to_write = [
             ["info:", info],
-            ["", "objective", "parameters"],
-            ["", "f(x)"] + self._x_dict_all["param"],
-            ["initial:", self._x_dict_all["obj"][0]] + self._x_dict_all["val"],
+            ["problem:", "minimize(f(x)), where `x` is the set of active parameters and `f` is the objective."],
+            ["book:" f"{self.xw.book.name}"],
+            ["sheet:", f"{self.xw.sheet.name}"],
             [""],
-            ["active parameters"],
-            ["", "f(x)"] + self.x_param['param'],
-            ["initial:", self._x_dict_all["obj"][0]] + self.x_param['val'],
-            ["final:", result.fun] + result.x.tolist(),
+            ["", "objective", "error", "parameters (all)"],
+            ["", "f(x)", "err(x)"] + self._x_dict_all["param"],
+            ["initial:", self._x_dict_all["obj"][0], self._x_dict_all["obj"][1]] + self._x_dict_all["val"],
+            ["min:", "", "", self._x_dict_all["min"]],
+            ["max:", "", "", self._x_dict_all["max"]],
+            [""],
+            ["", "objective", "error", "parameters (active)"],
+            ["", "f(x)", "err(x)"] + self.x_param['param'],
+            ["initial:", self._x_dict_all["obj"][0], self._x_dict_all["obj"][1]] + self.x_param['val'],
+            ["final:", result.fun, ""] + result.x.tolist(),
+            [""],
+            ["optimizer algorithm / hyperparameters / results"],
             ["algo_method:", self.algo_param['method']],
             ["algo_param:"] + [f"{key}={val}" for key, val in self.algo_param['param'].items()],
             ["success:", result.success],
@@ -507,32 +594,34 @@ class Excel_Solver:
         ]
 
         # Writing data to Excel using a loop
-        self._xw_app.screen_updating = False
+        self.xw.app.screen_updating = False
         start_row = 1
         for i, row_data in enumerate(data_to_write, start=start_row):
             sheet.range(f"A{i}").value = row_data
                         
         # Write the candidate solutions (header, active params, f(x), x)
-        if len(self.solution['f']) > 0:
+        sol = self.solution #dict of solution variables
+        if len(sol['f']) > 0:
             r = i+2
-            sheet.range(f"A{r+0}").value = ["candidate solutions:", "all `x` that yield `f(x) < storage_tol`."]
-            sheet.range(f"A{r+1}").value = ["idx", "objective", "parameters (indices / names / values)"]
-            sheet.range(f"A{r+2}").value = ["", ""] + self.x_param['indices']
-            sheet.range(f"A{r+3}").value = ["", ""] + self.x_param['param']
-            for i, (f, x) in enumerate(zip(self.solution['f'], self.solution['x'])):
+            sheet.range(f"A{r+0}").value = [f"candidate solutions: all `x` that yield `f(x) < {sol['storage_tol']}`."]
+            sheet.range(f"A{r+1}").value = ["nSolutions:", len(sol['f'])]
+            sheet.range(f"A{r+2}").value = ["idx", "objective", "error", "parameters (indices / names / values)"]
+            sheet.range(f"A{r+3}").value = ["", "", ""] + self.x_param['indices']
+            sheet.range(f"A{r+4}").value = ["", "f(x)", "err(x)"] + self.x_param['param']
+            for i, (f, e, x) in enumerate(zip(sol['f'], sol['error'], sol['x'])):
                 r += 1
-                sheet.range(f"A{r+3}").value = [i, f] + x.tolist()
-        self._xw_app.screen_updating = True
+                sheet.range(f"A{r+4}").value = [i, f, e] + x.tolist()
+        self.xw.app.screen_updating = True
         
         # Apply `kwargs`
         if kwargs.get('autofit', False):
             sheet.autofit('columns')
 
-    def close_excel(self):
+    def close_excel(self)->None:
         """Closes the Excel file and releases all associated resources."""
-        self._xw_book.save()
-        self._xw_book.close()
-        self._xw_app.quit()
+        self.xw.book.save()
+        self.xw.book.close()
+        self.xw.app.quit()
 
 # SCRIPT
 
@@ -562,19 +651,25 @@ def main(book_path:Path, **kwargs):
     
     # use `optimize` method to solve
     result = solver.optimize()
-    print(result)
 
     # print candidate solutions to sheet
     solver.print_solutions(sheet_name=kwargs.get("solution_sheet"))
-
+    print(result)
+    
 if __name__ == "__main__":
     
     # set demo path
     THIS_DIR = Path(__file__).parent
-    demo_path = THIS_DIR / "demo.xlsx"
+    demo_path = THIS_DIR / "optimizer_demo.xlsx"
 
     # set path to Excel book where optimization will occur
-    DIR = Path(r"C:\Users\cjsis\Documents\Ennova\Clients\Oxy\Oxy-MP-GC-608\fpxl")
-    book_path = DIR / "fpxl_Oxy-MP-GC-608.xlsm"
+    DIR = Path(r"C:\Users\cjsis\Documents\Ennova\Clients\Oxy\Oxy-MP-561-3\fpxl")
+    book_path = DIR / "fpxl_Oxy-MP-561-3.xlsm"
+    kwargs = {
+        'sheet_name': 'project',
+        'param_rg_name': 'pySolve_Param',
+        'algo_rg_name': 'pySolve_Algo',
+        'solution_sheet': 'solutions',
+    }
 
-    main(demo_path, solution_sheet="solutions")
+    main(book_path, **kwargs)

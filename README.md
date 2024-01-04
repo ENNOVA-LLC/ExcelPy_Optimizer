@@ -1,13 +1,17 @@
 # Excel Solver for Optimization
 
-This folder contains a Python script, `optimizer.py`, which uses the `scipy.optimize` library to optimize parameters specified in a given Excel range named `pySolve_Param`. This script is designed to interface with Excel using `xlwings`, allowing for seamless integration of Python's powerful optimization capabilities with Excel's user-friendly interface.
+This folder contains a Python script, `optimizer.py`, which uses the [`scipy.optimize`][scipy_optimize] library to optimize parameters specified in a given Excel range named `pySolve_Param`. This script is designed to interface with Excel using [`xlwings`][xlwings], allowing for seamless integration of Python's powerful optimization capabilities with Excel's user-friendly interface.
 
 ## Features
 
 - Optimization of parameters directly from an Excel workbook.
-- Support for various optimization algorithms from `scipy.optimize`, including `minimize`, `basinhopping`, `differential_evolution`, `brute`, `shgo`, `dual_annealing`, and `direct`.
+- Support for various optimization algorithms from [`scipy.optimize`][scipy_optimize], including `minimize`, `basinhopping`, `differential_evolution`, `brute`, `shgo`, `dual_annealing`, and `direct`.
 - Ability to specify optimization parameters and settings within the Excel workbook.
 - Storage and display of candidate solutions meeting specific criteria.
+
+<!--REFS-->
+[scipy_optimize]: https://docs.scipy.org/doc/scipy/reference/optimize.html#optimization
+[xlwings]: https://docs.xlwings.org/en/stable/quickstart.html
 
 ## Requirements
 
@@ -22,6 +26,8 @@ To run this script, you need:
 1. Open the `optimizer.py` script in a Python editor or IDE.
 2. Modify the path to the Excel workbook in the script to point to your file.
 3. Run the script. The optimization results will be written to the Excel file, and candidate solutions will be printed in a new sheet named "Solutions".
+
+Refer to the `optimizer_demo.xlsx` file for an example of how to configure the optimization.
 
 ## Script Overview
 
