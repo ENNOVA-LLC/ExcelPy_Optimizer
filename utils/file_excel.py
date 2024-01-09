@@ -5,6 +5,8 @@ input/output (reader/writer) functions
 
 Classes
 -------
+- XW(book, sheet_name, ranges, attr_names) -> instance of class
+    - abc
 - Read_XW(book_name, sheet_name, rg_list) -> instance of class
     - For reading data from Excel ranges.
     
@@ -27,9 +29,57 @@ import datetime
 from pathlib import Path
 import xlwings as xw
 import numpy as np
-import plotly.io as pio
 
 # CLASSES
+class XW:
+    """
+    xlwings convenience class.
+
+    This class provides a simplified interface for working with Excel files using the `xlwings` library.
+    """
+    
+    def __init__(self, book:Path, sheet_name:str, ranges:list[str], attr_names:list[str])->None:
+        """
+        Initializes a new instance of the `XW` class.
+
+        Parameters
+        ----------
+        book : str or Path
+            Path to the Excel file.
+        sheet_name : str
+            Name of the sheet where `ranges` are scoped.
+        ranges : list[str]
+            A list of range names.
+        attr_names : list[str], optional
+            A list of attribute names corresponding to `ranges`.
+
+        Attributes
+        ----------
+        app : xw.app
+            Excel application object. api: https://docs.xlwings.org/en/stable/api/app.html
+        book : xw.Book
+            Excel Workbook object. api: https://docs.xlwings.org/en/stable/api/book.html
+        sheet : xw.Sheet
+            Excel Worksheet object. api: https://docs.xlwings.org/en/stable/api/sheet.html
+        ranges : dict[xw.Range]
+            dict containing `xw.Range` objects. api: https://docs.xlwings.org/en/stable/api/range.html
+        """
+        self.book = get_book(book)
+        self.app = self.book.app
+        self.sheet = get_sheet(self.book, sheet_name)
+        self.ranges = {}
+        if attr_names is not None and len(ranges) == len(attr_names):
+            for rg, attr_name in zip(ranges, attr_names):
+                self.ranges[attr_name] = get_range(self.sheet, rg_name=rg, isValue=False)
+        else:
+            for rg in ranges:
+                self.ranges[rg] = get_range(self.sheet, rg_name=rg, isValue=False)
+                
+    def to_dict(self)->dict:
+        """abc."""
+        d = self.__dict__
+        return d
+        
 class Read_XW:
     
     def __init__(self, book_name:str or Path, sheet_name:str, rg_list:list[str], rg_args:dict=None, custom_rg_args:dict=None) -> None:
@@ -330,9 +380,9 @@ def dict_to_excel(rg:xw.main.Range, d:dict, keys:list[str], isRowHeader=True, is
             val_range.options(transpose=isRowHeader).value = val
 
 # PLOTLY
-def save_fig(fig, file_name:str or Path):
-    """Write Plotly figure to `file_name`."""
-    pio.kaleido.scope.default_format = "png"
-    fig.write_image(fig, file_name)
+# def save_fig(fig, file_name:str or Path):
+#     """Write Plotly figure to `file_name`."""
+#     pio.kaleido.scope.default_format = "png"
+#     fig.write_image(fig, file_name)
     
 # SCRIPT
