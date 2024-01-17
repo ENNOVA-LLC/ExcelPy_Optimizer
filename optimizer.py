@@ -2,7 +2,7 @@
 
 This class uses the `scipy.optimize` library to optimize the parameters
 specified in the `pySolve_Param` Excel range. `pySolve_Param` must adhere to a specific format
-to be used with this class.
+(shown in the `Notes` section) to be used with this class.
 
 Returns
 -------
@@ -18,29 +18,31 @@ References
 
 Notes
 -----
-The `pySolve_Param` range must be a named range scoped to the worksheet with the following row names:
+- The `pySolve_Param` range must be a named range scoped to the worksheet with the following row names:
     [0]: active?    -> Y/N denoting if param[i] is active
     [1]: param      -> parameter name
     [2]: val        -> parameter value
     [3]: min        -> min bound on parameter
     [4]: max        -> max bound on parameter
     [5]: obj        -> value of objective function
+- The `pySolve_Algo` range holds the hyperparameters for the chosen optimization algorithm. 
+Refer to the `_OPT_KWARGS` attribute to see the default values for the hyperparameters.
 """
+import time
 import datetime
 import json
+import tempfile
+from PIL import ImageGrab
 import dill
 import xlwings as xw
 from pathlib import Path
 import numpy as np
 from scipy.optimize import minimize, basinhopping, brute, differential_evolution, shgo, dual_annealing, direct
 from scipy.optimize import OptimizeResult, show_options
-from utils.file_excel import rg_to_dict
+from utils.file_excel import rg_to_dict, get_book
 from utils.json import cls_to_json, json_to_cls
 from utils.file_excel import XW
-
-# CONSTANTS
-THIS_DIR = Path(__file__).parent
-DATA_DIR = THIS_DIR / 'data'
+from utils.config import ROOT_DIR, DATA_DIR
     
 class Excel_Solver:
     """ 
@@ -56,11 +58,17 @@ class Excel_Solver:
     - dual_annealing: https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.dual_annealing.html
     - direct: https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.direct.html
     """
-        
-    _SOLVER_MAP = dict(active=1, param=2, val=3, min=4, max=5, obj=6)
+    # map for `pySolve_Param` range row numbers
+    _PARAM_MAP = dict(active=1, param=2, val=3, min=4, max=5, obj=6)
     # kwargs for different `scipy.optimize` methods
     _KWARGS = dict(bounds=None, args=())
-    #_OPTIONS = show_options(solver='minimize', disp=False)
+    # `scipy.optimize` methods
+    _OPT_METHODS = {
+        'global': ['basinhopping', 'brute', 'differential_evolution', 'shgo', 'dual_annealing', 'direct'],
+        'local': ['Nelder-Mead', 'Powell', 'CG', 'BFGS', 'Newton-CG', 'L-BFGS-B', 
+                  'TNC', 'COBYLA', 'SLSQP', 'trust-constr', 'dogleg', 'trust-ncg', 'trust-exact', 'trust-krylov']
+        }
+    # default hyperparameters for all `scipy.optimize` methods
     _OPT_KWARGS = {
         'minimize': dict(x0=None, method=None, jac=None, hess=None, hessp=None, bounds=None, constraints=(), tol=None, callback=None, options=None),
         'basinhopping': dict(x0=None, niter=100, T=1.0, stepsize=0.5, minimizer_kwargs=None, take_step=None, accept_test=None, callback=None, interval=50, 
@@ -76,14 +84,9 @@ class Excel_Solver:
                        f_min=-np.inf, f_min_rtol=0.0001, vol_tol=1e-16, len_tol=1e-06, callback=None),
         'options': dict(maxfev=None, f_min=None, f_tol=None, maxiter=None, maxev=None, maxtime=None, minhgrdint=None, symmetry=None),
     }
-    _OPT_METHODS = {
-        'global': ['basinhopping', 'brute', 'differential_evolution', 'shgo', 'dual_annealing', 'direct'],
-        'local': ['Nelder-Mead', 'Powell', 'CG', 'BFGS', 'Newton-CG', 'L-BFGS-B', 
-                  'TNC', 'COBYLA', 'SLSQP', 'trust-constr', 'dogleg', 'trust-ncg', 'trust-exact', 'trust-krylov']
-        }
     
     def __init__(self, book:Path, sheet_name:str="project", param_rg_name:str="pySolve_Param", algo_rg_name:str="pySolve_Algo",
-                 objective_dict:dict=None)->None:
+                 objective_dict:dict=None, **kwargs)->None:
         """
         Initializes an instance of the class.
 
@@ -91,7 +94,7 @@ class Excel_Solver:
         ----------
         book : Path 
             The path to the Excel file.
-        sheet_name : str
+        sheet_name : str or xw.Sheet
             The name of the worksheet.
         param_rg_name : str, optional
             The name of the "param" range in the worksheet. Defaults to "pySolve_Param".
@@ -102,6 +105,8 @@ class Excel_Solver:
             
         Attributes
         ----------
+        xw : XW class instance
+            Contains attributes {book, sheet, ranges}.
         x_param : dict {keys: 'val', 'min', 'max'}
             Active `x` parameters.
         x_param_all : dict {keys: 'val', 'min', 'max'}
@@ -113,8 +118,6 @@ class Excel_Solver:
         
         Private Attributes
         ------------------
-        _xw : XW class instance
-            Contains attributes {book, sheet, ranges}
         _solver_admin : dict {keys: 'DIR', 'check_file', 'terminate_optimization'}
             Contains keys for optimization termination.
             
@@ -126,6 +129,8 @@ class Excel_Solver:
             Writes `self.solution` info to an Excel sheet.
         write_solution_to_solver_range(idx) -> None:
             Write `x[idx]` to the Excel solver range.
+        copy_figure_to_solution_sheet(idx_list) -> None:
+            Write figure images to the `solution` sheet corresponding to candidate solutions in `idx_list`.
         """
         # xlwings objects
         self.init_xw(book, sheet_name, param_rg_name, algo_rg_name)
@@ -137,7 +142,7 @@ class Excel_Solver:
         
         # outputs from `self.optimize()` method
         self.solution = dict(result=None, nfev=0, storage_tol=None, nSolutions=None,
-                             f=[], x=[], error=[], penalty=[])   # storage for solutions (result, f(x), x)
+                             f=[], x=[], error=[], penalty=[], sheet=kwargs.get('solution_sheet', 'OptimizeResult'))   # storage for solutions (result, f(x), x)
         self.solution['storage_tol'] = self.algo_param['param'].pop('storage_tol', None)
         
         # f(x), custom objective
@@ -147,34 +152,36 @@ class Excel_Solver:
     def init_param(self)->None:
         """Constructs the attribute(s): `solver_admin, x_param_all, x_param, algo_param`."""
         self.init_solver_admin()
-        self.init_x_param()
-        self.init_algo_param()
+        if not hasattr(self, 'x_param'):
+            self.init_x_param()
+            self.init_algo_param()
     
-    def init_solver_admin(self)->None:
+    def init_solver_admin(self) -> None:
         """Constructs the attribute(s): `solver_admin`."""
         this_file = Path(__file__)
         DIR = this_file.parent
         self._solver_admin = {
             'path': this_file,
-            'script_name': f"{DIR.name}/{this_file.name}", 
-            'check_file': DIR / 'stop_optimizer.txt', # check-file for terminating optimization
-            'terminate_optimization': False #flag to terminate optimization
+            'script_name': f"{DIR.name}/{this_file.name}",
+            'check_file': DIR / 'stop_optimizer.txt',  # check-file for terminating optimization
+            'terminate_optimization': False,  # flag to terminate optimization
         }
+        self._solver_admin['storage_path'] = self._make_file_path(file_extension='json')
         
-    def init_xw(self, book, sheet_name, param_rg_name, algo_rg_name)->None:
+    def init_xw(self, book:xw.Book, sheet_name:str, param_rg_name:str, algo_rg_name:str)->None:
         """Constructs the attribute(s): `xw`."""
-        self._xw = XW(book, sheet_name, [param_rg_name, algo_rg_name], ['rg_x', 'rg_algo'])
+        self.xw = XW(book, sheet_name, [param_rg_name, algo_rg_name], ['rg_x', 'rg_algo'])
     
     def init_x_param(self)->None:
         """Constructs the attribute(s): `x_param_all, x_param`."""
-        self.x_param_all = self._x_rg_to_dict(self._xw.ranges['rg_x'])
+        self.x_param_all = self._x_rg_to_dict(self.xw.ranges['rg_x'])
         self.x_param = self._read_x_active(self.x_param_all)        
     
     def init_algo_param(self)->None:
         """Constructs the attribute(s): `algo_param`."""
         self.algo_param = dict(method=None, param=None, objective='default')
-        if self._xw.ranges['rg_algo'] is not None:
-            algo_params = self._x_rg_to_dict(self._xw.ranges['rg_algo'])
+        if self.xw.ranges['rg_algo'] is not None:
+            algo_params = self._x_rg_to_dict(self.xw.ranges['rg_algo'])
             self.algo_param['method'], self.algo_param['param'] = self._read_algo_params(algo_params)
             self.algo_param['objective'] = self.algo_param['param'].pop('objective', 'default')
             # add `param_x` to `algo['param']`
@@ -298,15 +305,15 @@ class Excel_Solver:
         x : list or numpy array
             The current values of the optimization parameters.
         """
-        s = self._SOLVER_MAP
+        s = self._PARAM_MAP
         for i, xi in zip(self.x_param['indices'], x):
-            self._xw.ranges['rg_x'](s['val'], i+2).value = xi
+            self.xw.ranges['rg_x'](s['val'], i+2).value = xi
     
     def _get_objective(self, objective_type:str)->dict or float:
         """Read value from objective cell."""
-        s = self._SOLVER_MAP
+        s = self._PARAM_MAP
         if objective_type == 'default':
-            f = self._xw.ranges['rg_x'].value[s['obj']-1]
+            f = self.xw.ranges['rg_x'].value[s['obj']-1]
             c = 1 # Assuming the objective value is in col=1
             return dict(f=f[c], error=f[c+1], penalty=f[c+2]) 
         else:
@@ -332,10 +339,10 @@ class Excel_Solver:
             self._solver_admin['terminate_optimization'] = True
             return float(np.inf)
         # Pass active `x` to Excel solver range
-        self._xw.app.calculation = 'manual'
+        self.xw.app.calculation = 'manual'
         self._pass_x_to_solver(x)
-        self._xw.app.calculate()
-        self._xw.app.calculation = 'automatic'
+        self.xw.app.calculate()
+        self.xw.app.calculation = 'automatic'
         # read or evaluate objective
         obj = self._get_objective(objective_type)
         if isinstance(obj, dict):
@@ -412,13 +419,13 @@ class Excel_Solver:
         """Check for a specific condition or signal to terminate the optimization."""
         return False if check_file is None else Path(check_file).exists()
 
-    def _optimize_args(self, method:str, opt_kwargs:dict)->tuple[str, dict]:
+    def _optimize_args(self, method:str, opt_kwargs:dict) -> tuple[str, dict]:
         """Aux method for `optimize()` to handle `opt_args` input."""
         # handle `method` input
         if method is not None:
             self.algo_param['method'] = method
         method = self.algo_param['method'].lower()
-        
+
         # TODO This needs to be handled differently. Should not try to build `kwargs`, rather allow user full control of the definition of `kwargs`. 
         # There are too many details to handle to make this method work with all the different optimization algorithms. Give the user a method for getting the default `kwargs` for a 
         # particular method and then they can modify those `kwargs` how they see fit and then deal with any errors thrown by the optimization algorithms.
@@ -426,47 +433,49 @@ class Excel_Solver:
             opt_kwargs = self.algo_param['param'] # algorithm parameters
         else:
             opt_kwargs.update(self.algo_param['param'])  # Combine with additional kwargs, if any
-        local_minimizer= opt_kwargs.get('local_minimizer', None)
         bounds = opt_kwargs.get('bounds', None)
         opt_kwargs = self._filter_kwargs(method, opt_kwargs)
-            
+
         # handle `minimizer_kwargs` if a key in `kwargs`
         if 'minimizer_kwargs' in opt_kwargs:
-            minimizer_kwargs = self._OPT_KWARGS['minimize']
-            minimizer_kwargs.pop('x0', None)
-            minimizer_kwargs['method'] = local_minimizer
-            minimizer_kwargs['bounds'] = bounds
-            if opt_kwargs['minimizer_kwargs'] is not None:
-                minimizer_kwargs.update(opt_kwargs.pop('minimizer_kwargs', {}))
-            opt_kwargs['minimizer_kwargs'] = minimizer_kwargs
-        
+            self._optimize_args_minimizer(bounds, opt_kwargs)
         if 'x0' in opt_kwargs:
             opt_kwargs['x0'] = self.x_param.get('val', np.ones(len(bounds), dtype=float))
 
         # add callback to `kwargs` (allows user to stop optimization early)
         if opt_kwargs['callback'] is None:
             opt_kwargs['callback'] = None #self._solver_callback       
-            
+
         return method, opt_kwargs
+
+    def _optimize_args_minimizer(self, bounds, opt_kwargs:dict)->None:
+        """Aux method for `optimize_args()` to handle `minimizer_kwargs`."""
+        minimizer_kwargs = self._OPT_KWARGS['minimize']
+        minimizer_kwargs.pop('x0', None)
+        minimizer_kwargs['method'] = opt_kwargs.get('local_minimizer')
+        minimizer_kwargs['bounds'] = bounds
+        if opt_kwargs['minimizer_kwargs'] is not None:
+            minimizer_kwargs.update(opt_kwargs.pop('minimizer_kwargs', {}))
+        opt_kwargs['minimizer_kwargs'] = minimizer_kwargs
     
-    def _optimize_run(self, method:str, args=(), **opt_kwargs:dict)->OptimizeResult:
+    def _optimize_run(self, method:str, args=(), **opt_kwargs:dict) -> OptimizeResult:
         """Aux method for `optimize()` to call optimization routine."""
         try:
-            if method == 'differential_evolution':
-                result = differential_evolution(self._objective_function, args=args, **opt_kwargs)
-            elif method == 'basinhopping':
+            if method == 'basinhopping':
                 result = basinhopping(self._objective_function, **opt_kwargs)
             elif method == 'brute':
                 result = brute(self._objective_function, args=args, **opt_kwargs)
+            elif method == 'differential_evolution':
+                result = differential_evolution(self._objective_function, args=args, **opt_kwargs)
+            elif method == 'direct':
+                result = direct(self._objective_function, args=args, **opt_kwargs)
+            elif method == 'dual_annealing':
+                result = dual_annealing(self._objective_function, args=args, **opt_kwargs)
             elif method == 'shgo':
                 if opt_kwargs['minimizer_kwargs']['method'] is None:
                     opt_kwargs['minimizer_kwargs']['method'] = 'SLSQP'
                 result = shgo(self._objective_function, args=args, **opt_kwargs)
-            elif method == 'dual_annealing':
-                result = dual_annealing(self._objective_function, args=args, **opt_kwargs)
-            elif method == 'direct':
-                result = direct(self._objective_function, args=args, **opt_kwargs)  
-            else: # Assuming the default case is a local minimizer
+            else:
                 result = minimize(self._objective_function, args=args, **opt_kwargs)
         except Exception as e:
             result = None
@@ -476,7 +485,7 @@ class Excel_Solver:
                 raise e
         return result
             
-    def optimize(self, method:str=None, args=(), **opt_kwargs) -> OptimizeResult:
+    def optimize(self, method:str=None, args:tuple=None, **opt_kwargs) -> OptimizeResult:
         """
         Optimizes the parameters specified in the Excel 'pySolve_Param' range using
         the optimization algorithm specified in the Excel 'pySolve_Settings' range.
@@ -511,82 +520,164 @@ class Excel_Solver:
 
         Example
         -------
-        >>> solver = Excel_Solver(book=book_path, sheet_name="Sheet1", param_rg_name="pySolve_Param", algo_rg_name="pySolve_Algo")
+        >>> solver = Excel_Solver(book=book_path, sheet_name="OptimizeResult", param_rg_name="pySolve_Param", algo_rg_name="pySolve_Algo")
         >>> solver.optimize(method='basinhopping')
         >>> solver.close_excel()
         """
         # get optimization method and kwargs
         method, opt_kwargs = self._optimize_args(method, opt_kwargs)    
-        
+
         # modify EXCEL app
         # NOTE: I don't know if `screen_updating` is causing the problems with Python crashing. 
         #self.xw.app.screen_updating = False
-        
+
         # run optimizer
-        args = ('default', True) #objective_type, write_to_list
-        try:
-            if method == 'differential_evolution':
-                result = differential_evolution(self._objective_function, args=args, **opt_kwargs)
-            elif method == 'basinhopping':
-                result = basinhopping(self._objective_function, **opt_kwargs)
-            elif method == 'brute':
-                result = brute(self._objective_function, args=args, **opt_kwargs)
-            elif method == 'shgo':
-                if opt_kwargs['minimizer_kwargs']['method'] is None:
-                    opt_kwargs['minimizer_kwargs']['method'] = 'SLSQP'
-                result = shgo(self._objective_function, args=args, **opt_kwargs)
-            elif method == 'dual_annealing':
-                result = dual_annealing(self._objective_function, args=args, **opt_kwargs)
-            elif method == 'direct':
-                result = direct(self._objective_function, args=args, **opt_kwargs)  
-            else: # Assuming the default case is a local minimizer
-                result = minimize(self._objective_function, args=args, **opt_kwargs)
-        except Exception as e:
-            result = None
-            if self._solver_admin['terminate_optimization']:
-                print("Optimization terminated by stop file!")
-            else:
-                raise e
-            
+        if args is None:
+            args = ('default', True) #objective_type, write_to_list
+        result = self._optimize_run(method, args, **opt_kwargs)
+
         # modify EXCEL app
         #self.xw.app.screen_updating = True
+
+        # Store results in `solution` dict
+        self.solution['nSolutions'] = len(self.solution['f'])
+        self.solution['result'] = result
         
         # Update the optimized values in the Excel sheet
-        self.solution['nSolutions'] = len(self.solution['f'])
-        if result is None:
-            if self.solution['nSolutions'] > 0:
-                f_min = min(self.solution['f'])
-                x = self.solution['x'][self.solution['f'].index(f_min)]
-            else:
-                x = opt_kwargs['x0']
-        else:
+        if result is not None:
             x = result.x
+        elif self.solution['nSolutions'] > 0:
+            f_min = min(self.solution['f'])
+            x = self.solution['x'][self.solution['f'].index(f_min)]
+        else:
+            x = opt_kwargs['x0']
         self._objective_function(x, *args)
-        self.solution['result'] = result
         return result
     
     # region - writing to Excel sheet
-    def write_solution_to_solver_range(self, idx:int)->None:
+    def write_solution_to_solver_range(self, idx:int, isPrint=True)->None:
         """Write x[idx] to the Excel solver range.
         
         Parameters
         ----------
-        idx : int
+        idx : int or array-like[int]
             idx of the `solution['x']` attribute to print to Excel range.
         """
+        # Ensure idx is a list for uniform processing
+        if not isinstance(idx, (list, tuple, np.ndarray)):
+            idx = [idx]
+            
         # extract solution from `idx`
-        f = self.solution['f'][idx]
-        x = self.solution['x'][idx]
+        for j in idx:
+            f = self.solution['f'][j]
+            x = self.solution['x'][j]
+            
+            # write `x` to solver range
+            f0 = self._objective_function(x, write_to_storage=False)
+            if isPrint:
+                x0 = [f"{xi:.5f}" for xi in x]
+                x1 = [f"{self.x_param['param'][i]}={x0[i]}" for i in range(min(len(self.x_param['param']), len(x0)))]
+                print(f"idx={j}; objective (from storage)={f}; objective (current)={f0}")
+                print(f"x: {x1}")
+                
+    def copy_figure_to_solution_sheet(self, solution_tol:float=None, idx_list:list[int]=None, excel_dict:dict=None, isPrint=False) -> None:
+        """Writes all figures to the solution sheet.
         
-        # write `x` to solver range
-        f0 = self._objective_function(x, write_to_storage=False)
-        x0 = [f"{v:.5f}" for v in x]
-        x1 = [f"{self.x_param['param'][i]}={x0[i]}" for i in range(min(len(self.x_param['param']), len(x0)))]
-        print(f"idx={idx}; objective={f0}")
-        #print(f"x: {self.x_param['param']}={x0}")
-        print(f"x: {x1}")
+        Parameters
+        ----------
+        solution_tol : float
+            The solution tolerance. All figures corresponding to `solutions['f'] < tol` are printed to `solution_sheet`
+        idx_list : int or list[int]
+            If provided, takes precedence over `solution_tol` to build sub-list of `x` solutions.
+        excel_dict : dict
+            A dictionary of args that define the settings for passing the figure from source (`fig_sheet`) to destination (`solution_sheet`).
+            - 'book' (str or Path): workbook containing `solution_sheet` (default=self._xw.book)
+            - 'solution_sheet' (str): destination sheet for figures (default='OptimizeResult')
+            - 'fig_sheet' (str or xw.Sheet): source sheet for figure (default=ActiveSheet)
+            - 'fig_name' (str): name of source figure (default='Group 1')
+            - 'to_col' (str): destination col for figure (default='H')
+            - 'to_row' (int): destination row for figure (default=41)
+        isPrint : bool
+            If True, prints the solution info to the console
+        """
+        def copy_fig(fig_dict:dict, max_retries=3, sleep_interval=5.0)->None:
+            for i in range(max_retries):
+                try:
+                    fig = fig_dict['fig']
+                    fig.api.Copy()
+                    return  # Successful copy
+                except Exception as e:
+                    if i < max_retries - 1:
+                        time.sleep(sleep_interval)
+                        fig_dict['fig'] = fig_dict['sheet'].shapes[fig_dict['name']]
+                    else:
+                        raise e # Re-raise the last exception after all retries have failed
         
+        # Define xs, subset of `x` that meets desired `solution_tol`
+        if idx_list is not None:
+            if isinstance(idx_list, int):
+                idx_list = [idx_list]
+            xs = [self.solution['x'][i] for i in idx_list]
+        elif solution_tol is not None:
+            idx_list, xs = [], []
+            for i, (x, f) in enumerate(zip(self.solution['x'], self.solution['f'])):
+                if f < solution_tol:
+                    idx_list.append(i)
+                    xs.append(x)
+            #idx_list = [i for i, f in enumerate(self.solution['f']) if f < solution_tol]
+            #xs = [self.solution['x'][i] for i in idx_list]
+        else:
+            raise ValueError("Either `solution_tol` or `idx_list` must be provided.")
 
+        # get `solution_sheet` and `to_cell` info
+        # `solution` sheet can be in a separate workbook, must provide excel_dict['book'] if so
+        book = get_book(excel_dict.get('book', self.xw.book))
+        solution_sheet = excel_dict.get('solution_sheet', self.solution.get('sheet', 'OptimizeResult'))
+        if isinstance(solution_sheet, str):
+            solution_sheet = book.sheets[solution_sheet]
+        elif not isinstance(solution_sheet, xw.Sheet):
+            raise TypeError("`solution_sheet` must be of type `str` or `xw.Sheet`.")
+        sol_dict = dict(sheet=solution_sheet, to_col=excel_dict.get('to_col', 'H'), to_row=excel_dict.get('to_row', 41))
+        
+        # get `fig` object
+        fig_sheet = excel_dict.get('fig_sheet', self.xw.book.api.ActiveSheet)
+        fig_name = excel_dict.get('fig_name', 'Group 1')
+        if isinstance(fig_sheet, str):
+            fig_sheet = self.xw.book.sheets[fig_sheet]
+        elif not isinstance(fig_sheet, xw.Sheet):
+            raise TypeError("`fig_sheet` must be of type `str` or `xw.Sheet`.")
+        fig_dict = dict(sheet=fig_sheet, name=fig_name, fig=fig_sheet.shapes[fig_name])
+        
+        valid_paste_types = ['image', 'normal']
+        paste_type = excel_dict.get('paste_type', valid_paste_types[0])
+        if paste_type not in valid_paste_types:
+            raise ValueError(f"Invalid `paste_type` value. Must be in set {valid_paste_types}. Got '{paste_type}' instead.")
+        
+        screen_updating = self.xw.app.screen_updating
+        self.xw.app.screen_updating = True
+        for idx, x in zip(idx_list, xs):            
+            # Update Excel with solution
+            self.write_solution_to_solver_range(idx, isPrint=isPrint)
+            
+            # Copy source figure
+            copy_fig(fig_dict, max_retries=3, sleep_interval=5.0)
+            
+            # Paste figure to destination cell
+            to_cell = sol_dict['sheet'].range(f"{sol_dict['to_col']}{sol_dict['to_row']+idx}")
+            if paste_type == 'image':
+                # this method is preferred
+                # creates a temp file, saves fig to file, writes fig to sheet, then deletes the temp file
+                temp_path = Path(tempfile.gettempdir()) / f'fig_{idx}.png'
+                img = ImageGrab.grabclipboard()
+                img.save(temp_path, 'PNG')
+                sol_dict['sheet'].pictures.add(str(temp_path), name=f"fig_{idx}", top=to_cell.top, left=to_cell.left)
+                temp_path.unlink()
+            elif paste_type == 'normal':
+                # this method doesn't work properly because the plot continues referencing the source data, which is updating
+                sol_dict['sheet'].api.Paste(to_cell.api)
+        # restore
+        self.xw.app.screen_updating = screen_updating
+        
     def print_solutions(self, sheet_name="OptimizeResult", **kwargs) -> None:
         """
         Writes the candidate solutions and their corresponding objective values to a new Excel sheet.
@@ -597,7 +688,7 @@ class Excel_Solver:
 
         Parameters
         ----------
-        sheet_name : str, optional
+        sheet_name : str or xw.Sheet, optional
             The name of the Excel sheet where the solutions will be written. If a sheet with the given name
             already exists, it will be overwritten. The default name is "OptimizeResult".
         **kwargs : dict, optional
@@ -615,43 +706,74 @@ class Excel_Solver:
         >>> result = solver.optimize()  # returns `OptimizeResult` object
         >>> solver.print_solutions(sheet_name="OptimizeResult")
         """
-        # Create a new Excel sheet for the solutions (delete the sheet if it already exists)
-        if sheet_name in [s.name for s in self._xw.book.sheets]:
-            self._xw.book.sheets[sheet_name].delete()
-        sheet = self._xw.book.sheets.add(name=sheet_name)
+        def make_new_sheet(book:xw.Book, base_sheet_name:str)->xw.Sheet:
+            """Create a new `xw.Sheet` object with `base_sheet_name`."""
+            if base_sheet_name in [s.name for s in book.sheets]:
+                i = 1
+                sheet_name = f"{base_sheet_name}_{i}"
+                while sheet_name in [s.name for s in book.sheets]:
+                    i += 1
+                    sheet_name = f"{base_sheet_name}_{i}"
+            else:
+                sheet_name = base_sheet_name
 
-        # Write the (info, initial, final, `result` object) to sheet
-        # initial: initial values of the FULL parameter set (including inactive parameters)
-        # final: values and properties of the `result` of the optimization
+            # Add the new sheet with the determined name
+            sheet = book.sheets.add(name=sheet_name)
+            return sheet
+
+        # Create a new Excel sheet for the solutions
+        if sheet_name is None:
+            sheet_name = self.solution.get('sheet', 'OptimizeResult')
+        if isinstance(sheet_name, xw.Sheet):
+            book = sheet_name.book
+            sheet_name = sheet_name.name
+        else:
+            book = self.xw.book        
+        sheet = make_new_sheet(book, base_sheet_name=sheet_name)
+        self.solution['sheet'] = sheet.name
+        
+        # Write to `sheet`: (info, initial, final, `result` object)
+        # initial: 
+        # - algorithm hyperparameters (`algo_param`)
+        # - initial values of the FULL parameter set (including inactive parameters, `x_param_all`)
+        # final: 
+        # - values and properties of the `result` of the optimization
+        # - all candidate solutions that meet `solution_tol`
         sol = self.solution
         result = sol['result']
         data = [
             ["info:", "This sheet created using the `Excel_Solver.print_solutions()` method, where the solutions were generated by the `.optimize()` method."],
             ["problem:", "min(f(x)), where `x` is the set of active parameters and `f` is the objective."],
             ["script:", kwargs.get('script', self._solver_admin['script_name'])],
-            ["book:", f"{self._xw.book.name}"],
-            ["sheet:", f"{self._xw.sheet.name}"],
-            ["ranges:", f"{self._xw.ranges['rg_x'].name.name}, {self._xw.ranges['rg_algo'].name.name}"],
+            ["book:", f"{self.xw.book.name}"],
+            ["sheet:", f"{self.xw.sheet.name}"],
+            ["ranges:", f"{self.xw.ranges['rg_x'].name.name}, {self.xw.ranges['rg_algo'].name.name}"],
+            ["storage:", f"{self._solver_admin['storage_path'].resolve()}"],
             [""],
             ["problem setup:"],
-            [f"x[0] and x-bounds (defined in Excel range `{self._xw.ranges['rg_x'].name.name}`)"],
+            ["optimizer:", f"algorithm / hyperparameters (defined in Excel range `{self.xw.ranges['rg_algo'].name.name}`)"],
+            ["algo_method:", self.algo_param['method']],
+            ["algo_param:"] + [f"{key}={val}" for key, val in self.algo_param['param'].items()],
+            [""],
+            [f"x[0] and x-bounds (defined in Excel range `{self.xw.ranges['rg_x'].name.name}`)"],
             ["", "objective", "error", "parameters (all)"],
-            ["", "", ""] + list(range(len(self.x_param_all['param']))),
+            ["indices:", "", ""] + list(range(len(self.x_param_all['param']))),
             ["", "f(x)", "err(x)"] + self.x_param_all["param"],
             ["initial:", self.x_param_all["obj"][0], self.x_param_all["obj"][1]] + self.x_param_all["val"],
             ["min:", "", ""] + self.x_param_all["min"],
             ["max:", "", ""] + self.x_param_all["max"],
             [""],
+            ["results:"],
             ["", "objective", "error", "parameters (active)"],
+            ["indices:", "", ""] + self.x_param['indices'],
             ["", "f(x)", "err(x)"] + self.x_param['param'],
             ["initial:", self.x_param_all["obj"][0], self.x_param_all["obj"][1]] + self.x_param['val'],
         ]
+        # extract output from the `result` object
         if result is None:
             if sol['nSolutions'] > 0:
                 f_min = min(sol['f'])
-                idx = sol['f'].index(f_min)
-                e_min = sol['error'][idx]
-                x_min = sol['x'][idx]
+                idx, e_min, x_min = sol['f'].index(f_min), sol['error'][idx], sol['x'][idx]
                 data_result = [
                     ["final:", f_min, e_min] + x_min.tolist(),
                 ]
@@ -660,97 +782,103 @@ class Excel_Solver:
                     ["optimization failed!"]
                 ]
         else:
-            data_result = [
-                ["final:", result['fun'], ""] + result['x'].tolist(),
-                [""],
-                ["optimizer:", f"algorithm / hyperparameters (defined in Excel range `{self._xw.ranges['rg_algo'].name.name}`)"],
-                ["algo_method:", self.algo_param['method']],
-                ["algo_param:"] + [f"{key}={val}" for key, val in self.algo_param['param'].items()],
-                [""],
-                ["scipy.optimize.OptimizeResult:"],
-                ["message:", result['message']],
-                ["success:", result['success']],
-                ["fun:", result['fun']],
-                ["nfev:", result['nfev']],
-                ["nit:", result['nit']],
-            ]
+            try:
+                data_result = [
+                    ["final:", result['fun'], ""] + result['x'].tolist(),
+                    [""],
+                    ["scipy.optimize.OptimizeResult:"],
+                    ["message:", result['message']],
+                    ["success:", result['success']],
+                    ["fun:", result['fun']],
+                    ["nfev:", result['nfev']],
+                    ["nit:", result['nit']],
+                ]
+            except Exception:
+                data_result = [
+                    ["Error in `result` object!"]
+                ]
         data += data_result
 
-        # Writing data to Excel using a loop
-        self._xw.app.screen_updating = False
+        # Write `data` to Excel sheet
+        self.xw.app.screen_updating = False
         for i, row_data in enumerate(data, start=1):
             sheet.range(f"A{i}").value = row_data
 
         # Write the candidate solutions (header, active params, f(x), x)
         if sol['nSolutions'] > 0:
             data = [
-                [""],
                 ["solutions:", f"all candidate `x` that yield `f(x) < {sol['storage_tol']}`."],
                 ["nSolutions:", sol['nSolutions']],
                 ["idx", "objective", "error", "parameters (indices / names / values)"],
                 ["", "", ""] + self.x_param['indices'],
                 ["", "f(x)", "err(x)"] + self.x_param['param']
             ]
-
-            for i, row_data in enumerate(data, start=i+1):
+            data += [
+                [i, f, e] + x.tolist() for i, (f, e, x) in enumerate(zip(sol['f'], sol['error'], sol['x']))
+            ]
+            # Write `data` to Excel sheet
+            for i, row_data in enumerate(data, start=i+2):
                 sheet.range(f"A{i}").value = row_data
+        self.xw.app.screen_updating = True
 
-            r = i+1
-            for i, (f, e, x) in enumerate(zip(sol['f'], sol['error'], sol['x'])):
-                sheet.range(f"A{r}").value = [i, f, e] + x.tolist()
-                r += 1
-        self._xw.app.screen_updating = True
-
-        # Apply `kwargs`
+        # Apply `kwargs` to format `sheet`
         if kwargs.get('autofit', False):
             sheet.autofit('columns')
     # endregion
     
+
     # region - file management
     def close_excel(self)->None:
+
         """Closes the Excel file and releases all associated resources."""
-        self._xw.book.save()
-        self._xw.book.close()
-        self._xw.app.quit()
+        self.xw.book.save()
+        self.xw.book.close()
+        self.xw.app.quit()
     
     def _make_file_path(self, file_extension='json')->Path:
         """Aux method for making file path."""
-        t = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")    # Get the current date and time to create a unique filename
+        t = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")    # Get the current date and time to create a unique filename
         path = self._solver_admin['path'].parent
-        book = self._xw.book.name.split('.')[0]
+        book = self.xw.book.name.split('.')[0]
         return path / f"{book}_{t}.{file_extension}"
     
     def to_file(self, file_path:Path=None, file_extension:str=None) -> None:
-        """Master method for writing instance to file."""
-        valid_extensions = ['json', 'pkl']
+        """Master method for writing instance to file.
+        
+        Parameters
+        ----------
+        file_path : str or Path, optional
+            Path to write instance. If not provided, defaults to book name.
+        file_extension : str, optional
+            Writes file as `file_extension` type. Overwrites type specified by `file_path`. Valid args: {'pkl', 'json'}
+        """
         def get_path(path)->Path:
-            """Returns """
-            return self._make_file_path(file_extension) if path is None else Path(path)
+            """Returns `Path` object where file is to be written."""
+            return self._solver_admin.get('storage_path') if path is None else Path(path)
 
         def get_file_extension(path, file_extension)->str:
-            if file_extension is None:
-                return path.suffix if path.suffix != '' else 'json'
-            else:
+            """Returns file extension type."""
+            if file_extension is not None:
                 return file_extension
+            return path.suffix[1:] if path.suffix else 'json'                
 
+        valid_extensions = ['json', 'pkl']
         path = get_path(file_path)
         file_extension = get_file_extension(path, file_extension)
-        if file_extension in valid_extensions:
-            if file_extension == 'json':
-                self.to_json(file_path)
-            elif file_extension == 'pkl':
-                self.to_pickle(file_path)
-        else:
-            raise ValueError("Invalid file extension! {file_extension}")
+        if file_extension not in valid_extensions:
+            raise ValueError(f"Invalid file extension: `{file_extension}`! Valid extensions include: {valid_extensions}")
+
+        full_path = path.with_suffix(f'.{file_extension}')
+        if 'json' in file_extension:
+            self._to_json(full_path)
+        elif 'pkl' in file_extension:
+            self._to_pickle(full_path)
     
-    def to_pickle(self, file_path:Path=None)->None:
+    def _to_pickle(self, file_path:Path)->None:
         """Write instance to pickle file.
         Args:
             file_path (Path, optional): Path to pickle file. Defaults to None.
         """
-        if file_path is None:
-            file_path = self._make_file_path('pkl')
-        
         with open(file_path, 'wb') as f:
             dill.dump(self, f)
     
@@ -765,90 +893,20 @@ class Excel_Solver:
         with open(file_path, 'rb') as f:
             return dill.load(f)
     
-    def to_json(self, file_path:Path=None, indent=4)->None:
+    def _to_json(self, file_path:Path, indent=4)->None:
         """Dump public attributes to JSON file."""
-        if file_path is None:
-            file_path = self._make_file_path('json')
         cls_to_json(self, file_path, indent=indent)
 
     @classmethod
     def from_json(cls, file_path:Path):
         """Load attributes from JSON file."""
-        return json_to_cls(cls, file_path)
+        instance = json_to_cls(cls, file_path)
+        instance.init_param()
+        return instance
         
     # endregion
     
 # SCRIPT
-
-def run_solver(book_path:Path, **kwargs):
-    """
-    Parameters:
-        book_path (Path): The path to the book.
-        **kwargs: Optional keyword arguments.
-        - sheet_name (str): The name of the sheet, default="project".
-        - param_rg_name (str): The name of the "parameter" range name, default="pySolve_Param".
-        - algo_rg_name (str): The name of the "hyperparameters" range name, default="pySolve_Algo".
-    Returns:
-        None
-    """
-    # create instance of solver
-    solver = Excel_Solver(book=book_path, sheet_name=kwargs.get("sheet_name", "project"), 
-                          param_rg_name=kwargs.get("param_rg_name", "pySolve_Param"), 
-                          algo_rg_name=kwargs.get("algo_rg_name", "pySolve_Algo"),
-    )
-    
-    # modify algorithm parameters (methods: None, 'basinhopping', 'differential_evolution', 'shgo', 'dual_annealing', 'direct')
-    algo_method = None
-    if algo_method:
-        opt_params = solver.get_algo_params(method=algo_method)
-        opt_params['bounds'] = solver.algo_param['param']['bounds']
-        solver.set_algo_params(method=algo_method, param=opt_params)
-    
-    # use `optimize` method to solve `min(f(x))`
-    result = solver.optimize()
-
-    # save instance to file
-    file_name = kwargs.get('file_name')
-    if file_name is None:
-        file_name = f"{solver._xw.book.name.split('.')[0]}"
-        file_ext = 'json'    #{json, pkl, None}
-        file_path = DATA_DIR / f"{file_name}.{file_ext}"
-    else:
-        file_path = DATA_DIR / file_name
-    if file_ext == 'pkl':
-        solver.to_pickle(file_path)
-    elif file_ext == 'json':
-        solver.to_json(file_path)
-    
-    # print candidate solutions to sheet
-    solver.print_solutions(sheet_name=kwargs.get("solution_sheet"))
-    print(f"optimization result: {result}")
-
-def load_solver(file_path:Path, book_path:Path, **kwargs):
-    solver = Excel_Solver.from_json(file_path)
-    solver.init_xw(book_path, sheet_name=kwargs.get('sheet_name'), param_rg_name=kwargs.get('param_rg_name'), algo_rg_name=kwargs.get('algo_rg_name'))
-    solver.init_param()
-    solver.print_solutions(sheet_name=kwargs.get('solution_sheet'))
-    print(solver)
-
 if __name__ == "__main__":
-    
-    # set demo path
-    demo_path = THIS_DIR / "optimizer_demo.xlsx"
-
-    # set path to Excel book where optimization will occur
-    DIR = Path(r"C:\Users\cjsis\Documents\Ennova\Clients\Oxy\Oxy-MP-561-3\fpxl")
-    book_path = DIR / "fpxl_Oxy-MP-561-3.xlsm"
-    kwargs = dict(
-        sheet_name='project', param_rg_name='pySolve_Param', algo_rg_name='pySolve_Algo', 
-        solution_sheet='solutions',
-        file_name='fpxl_Oxy-MP-561-3_M10-b.json',
-    )
-    
-    run_optimizer = True
-    if run_optimizer:
-        run_solver(book_path, **kwargs)
-    else:
-        file_path = DATA_DIR / 'fpxl_Oxy-MP-561-3_M10_2.json'
-        load_solver(file_path, book_path, **kwargs)
-    print(f"{Path(__file__).name} complete!")
+    print("This module holds the class `Excel_Solver`. To see this class in use, refer to the file `main.py`.")
+    print(f"{Path(__file__).parent.name}/{Path(__file__).name} complete!")

@@ -38,7 +38,7 @@ class XW:
     This class provides a simplified interface for working with Excel files using the `xlwings` library.
     """
     
-    def __init__(self, book:Path, sheet_name:str, ranges:list[str], attr_names:list[str])->None:
+    def __init__(self, book:Path, sheet_name:str, ranges:list[str], attr_names:list[str]=None)->None:
         """
         Initializes a new instance of the `XW` class.
 
@@ -46,7 +46,7 @@ class XW:
         ----------
         book : str or Path
             Path to the Excel file.
-        sheet_name : str
+        sheet_name : str or xw.Sheet
             Name of the sheet where `ranges` are scoped.
         ranges : list[str]
             A list of range names.
@@ -64,9 +64,13 @@ class XW:
         ranges : dict[xw.Range]
             dict containing `xw.Range` objects. api: https://docs.xlwings.org/en/stable/api/range.html
         """
-        self.book = get_book(book)
+        if isinstance(sheet_name, xw.Sheet):
+            self.sheet = sheet_name
+            self.book = self.sheet.book
+        else:
+            self.book = get_book(book)
+            self.sheet = get_sheet(self.book, sheet_name)
         self.app = self.book.app
-        self.sheet = get_sheet(self.book, sheet_name)
         self.ranges = {}
         if attr_names is not None and len(ranges) == len(attr_names):
             for rg, attr_name in zip(ranges, attr_names):

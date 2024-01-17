@@ -29,3 +29,22 @@
 * **Notes**:
   1. `_solver_callback()` method still not working!
   2. TODO: modify `kwargs` handling in `optimize()` method.
+
+## 0.3.0
+
+* **Date**: 2024-01-16
+* **Major** revisions:
+  1. In `Excel_Solver` class,  
+     1. Added `to_file()` method for file management for saving class instances. Can also load instances from JSON.
+        1. Works with `json` files, For the `pickle` files, need to improve `save` method to handle `XW` class instance and also the `load` method.
+     2. Added `copy_figure_to_solution_sheet()` method to add post-processing functionality.
+     3. More output info provided from `print_solutions()` method.
+     4. User can now provide references to `xw.Sheet` objects so that sheets from outside `solver.xw.book` can be referenced.
+  2. Improved `optimizer_demo` for more clarity on usage of `Excel_Solver` class.
+     1. Added `.ipynb` and `.py` files to show how to use either UI.
+  3. Using a `check_file` in the `objective_function` as a temporary solution to the `_solver_callback` issue.
+  4. For `XW` class,  
+     1. Moved class definition to `utils.file_excel`.
+     2. Modified `utils.json` to handle the serializing and deserializing of a `XW` class instance.
+* **Notes**:
+  1. TODO: modify `kwargs` handling in `optimize()` method.
