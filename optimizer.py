@@ -85,6 +85,7 @@ class Excel_Solver:
         'options': dict(maxfev=None, f_min=None, f_tol=None, maxiter=None, maxev=None, maxtime=None, minhgrdint=None, symmetry=None),
     }
     
+    # region - init
     def __init__(self, book:Path, sheet_name:str="project", param_rg_name:str="pySolve_Param", algo_rg_name:str="pySolve_Algo",
                  objective_dict:dict=None, **kwargs)->None:
         """
@@ -141,22 +142,22 @@ class Excel_Solver:
             raise ValueError("No active parameters found in the `param_rg_name` range.")
         
         # outputs from `self.optimize()` method
-        self.solution = dict(result=None, nfev=0, storage_tol=None, nSolutions=None,
+        self.solution = dict(result=None, nfev=0, storage_tol=None, nSolutions=None, idx_min=None,
                              f=[], x=[], error=[], penalty=[], sheet=kwargs.get('solution_sheet', 'OptimizeResult'))   # storage for solutions (result, f(x), x)
-        self.solution['storage_tol'] = self.algo_param['param'].pop('storage_tol', None)
+        self.solution['storage_tol'] = kwargs.get('storage_tol', self.algo_param['param'].pop('storage_tol', None))
         
         # f(x), custom objective
         self._xw_f_custom = XW(book, objective_dict['sheet'], [objective_dict['rg']], ['rg']) if objective_dict else None
     
     # INIT auxiliary methods
-    def init_param(self)->None:
+    def init_param(self, **kwargs)->None:
         """Constructs the attribute(s): `solver_admin, x_param_all, x_param, algo_param`."""
-        self.init_solver_admin()
+        self.init_solver_admin(**kwargs)
         if not hasattr(self, 'x_param'):
             self.init_x_param()
             self.init_algo_param()
     
-    def init_solver_admin(self) -> None:
+    def init_solver_admin(self, **kwargs) -> None:
         """Constructs the attribute(s): `solver_admin`."""
         this_file = Path(__file__)
         DIR = this_file.parent
@@ -166,7 +167,7 @@ class Excel_Solver:
             'check_file': DIR / 'stop_optimizer.txt',  # check-file for terminating optimization
             'terminate_optimization': False,  # flag to terminate optimization
         }
-        self._solver_admin['storage_path'] = self._make_file_path(file_extension='json')
+        self._solver_admin['storage_path'] = kwargs.get('file_name', self._make_file_path(file_extension='json'))
         
     def init_xw(self, book:xw.Book, sheet_name:str, param_rg_name:str, algo_rg_name:str)->None:
         """Constructs the attribute(s): `xw`."""
@@ -227,6 +228,7 @@ class Excel_Solver:
         d_active['bounds'] = [(d['min'][i], d['max'][i]) for i, isActive in enumerate(d['active?']) if isActive == 'Y']
         del_keys(d_active, ['active?', 'min', 'max'])
         return d_active
+    # endregion
     
     def get_algo_params(self, method:str=None) -> dict:
         """Returns a copy of the `param_algo['param']` attribute."""
@@ -524,9 +526,22 @@ class Excel_Solver:
         >>> solver.optimize(method='basinhopping')
         >>> solver.close_excel()
         """
+        def check_x0(x0, bounds):
+            x0_new = []
+            for i, value in enumerate(x0):
+                lbound, ubound = bounds[i]
+                if value < lbound or value > ubound:
+                    # Value is outside bounds, set it to the midpoint
+                    midpoint = (lbound + ubound) / 2
+                    x0_new.append(midpoint)
+                else:
+                    x0_new.append(value)
+            return x0_new
+        
         # get optimization method and kwargs
         method, opt_kwargs = self._optimize_args(method, opt_kwargs)    
-
+        opt_kwargs['x0'] = check_x0(opt_kwargs['x0'], opt_kwargs['bounds'])
+        
         # modify EXCEL app
         # NOTE: I don't know if `screen_updating` is causing the problems with Python crashing. 
         #self.xw.app.screen_updating = False
@@ -540,15 +555,16 @@ class Excel_Solver:
         #self.xw.app.screen_updating = True
 
         # Store results in `solution` dict
-        self.solution['nSolutions'] = len(self.solution['f'])
+        f = self.solution['f']
+        self.solution['nSolutions'] = len(f)
+        self.solution['idx_min'] = f.index(min(f))
         self.solution['result'] = result
         
         # Update the optimized values in the Excel sheet
         if result is not None:
             x = result.x
         elif self.solution['nSolutions'] > 0:
-            f_min = min(self.solution['f'])
-            x = self.solution['x'][self.solution['f'].index(f_min)]
+            x = self.solution['x'][f.index(min(f))]
         else:
             x = opt_kwargs['x0']
         self._objective_function(x, *args)
@@ -587,8 +603,9 @@ class Excel_Solver:
         ----------
         solution_tol : float
             The solution tolerance. All figures corresponding to `solutions['f'] < tol` are printed to `solution_sheet`
-        idx_list : int or list[int]
+        idx_list : int or list[int] or str
             If provided, takes precedence over `solution_tol` to build sub-list of `x` solutions.
+            If `all` then prints all candidate solutions.
         excel_dict : dict
             A dictionary of args that define the settings for passing the figure from source (`fig_sheet`) to destination (`solution_sheet`).
             - 'book' (str or Path): workbook containing `solution_sheet` (default=self._xw.book)
@@ -612,11 +629,13 @@ class Excel_Solver:
                         fig_dict['fig'] = fig_dict['sheet'].shapes[fig_dict['name']]
                     else:
                         raise e # Re-raise the last exception after all retries have failed
-        
+
         # Define xs, subset of `x` that meets desired `solution_tol`
         if idx_list is not None:
             if isinstance(idx_list, int):
                 idx_list = [idx_list]
+            elif isinstance(idx_list, str):
+                idx_list = list(range(len(self.solution['f'])))
             xs = [self.solution['x'][i] for i in idx_list]
         elif solution_tol is not None:
             idx_list, xs = [], []
@@ -770,33 +789,38 @@ class Excel_Solver:
             ["initial:", self.x_param_all["obj"][0], self.x_param_all["obj"][1]] + self.x_param['val'],
         ]
         # extract output from the `result` object
-        if result is None:
-            if sol['nSolutions'] > 0:
-                f_min = min(sol['f'])
-                idx, e_min, x_min = sol['f'].index(f_min), sol['error'][idx], sol['x'][idx]
-                data_result = [
-                    ["final:", f_min, e_min] + x_min.tolist(),
-                ]
-            else:
-                data_result = [
-                    ["optimization failed!"]
-                ]
+        f = sol['f']
+        sol['nSolutions'] = len(f)
+        sol['idx_min'] = f.index(min(f))
+        
+        # if `result` is None, then build `result` from `sol` object
+        if sol['nSolutions'] > 0:
+            i = sol['idx_min']
+            f_min, e_min, x_min = sol['f'][i], sol['error'][i], sol['x'][i]
         else:
-            try:
-                data_result = [
-                    ["final:", result['fun'], ""] + result['x'].tolist(),
-                    [""],
-                    ["scipy.optimize.OptimizeResult:"],
-                    ["message:", result['message']],
-                    ["success:", result['success']],
-                    ["fun:", result['fun']],
-                    ["nfev:", result['nfev']],
-                    ["nit:", result['nit']],
-                ]
-            except Exception:
-                data_result = [
-                    ["Error in `result` object!"]
-                ]
+            f_min = e_min = x_min = None
+            
+        if result is None and f_min is not None:
+            result = dict(fun=f_min, x=x_min, message='`result` object constructed in post-processing', 
+                          success=False, nfev=None, nit=None)
+        
+        try:
+            x_list = result['x'].tolist() if 'x' in result and result['x'] is not None else ['N/A']
+            data_result = [
+                ["final:", result.get('fun', 'N/A'), ''] + x_list,
+                [""],
+                ["scipy.optimize.OptimizeResult:"],
+                ["message:", result.get('message', 'N/A')],
+                ["success:", result.get('success', 'N/A')],
+                ["fun:", result.get('fun', 'N/A')],
+                ["nfev:", result.get('nfev', 'N/A')],
+                ["nit:", result.get('nit', 'N/A')],
+            ]
+        except Exception:
+            data_result = [
+                ["Error in `result` object!"],
+                [''], [''], [''], [''], [''], [''], [''],
+            ]
         data += data_result
 
         # Write `data` to Excel sheet
@@ -807,7 +831,7 @@ class Excel_Solver:
         # Write the candidate solutions (header, active params, f(x), x)
         if sol['nSolutions'] > 0:
             data = [
-                ["solutions:", f"all candidate `x` that yield `f(x) < {sol['storage_tol']}`."],
+                ["solutions:", f"all candidate `x` that yield `f(x) < {sol.get('storage_tol', 'storage_tol')}`."],
                 ["nSolutions:", sol['nSolutions']],
                 ["idx", "objective", "error", "parameters (indices / names / values)"],
                 ["", "", ""] + self.x_param['indices'],
