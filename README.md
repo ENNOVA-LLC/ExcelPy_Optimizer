@@ -18,7 +18,7 @@ To run this script, you need:
 
 - Python installed on your system.
 - `scipy` and `xlwings` libraries installed in your Python environment.
-  - Use the `environment.yml` file and follow the instructions provided in the [install.md](docs/install.md) file to create a new conda environment for this package.
+  - Use the `environment.yml` file and follow the instructions provided in the [install_env.md](docs/install_env.md) file to create a new conda environment for this package.
 - An Excel workbook setup with `pySolve_Param` and `pySolve_Algo` ranges according to the required format.
 
 ## Usage

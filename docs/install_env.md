@@ -1,14 +1,14 @@
-# Optimization Environment Setup
+# Conda Environment Setup
 
-This guide will walk you through setting up a dedicated Conda environment for the optimization package.
+This guide will walk you through setting up a dedicated Conda environment for this package.
 
 ## Step 1: Install Conda
 
 If Conda is not already installed on your system, download and install [Miniconda](https://docs.conda.io/en/latest/miniconda.html) or [Anaconda](https://www.anaconda.com/products/distribution).
 
-## Step 2: Create an `environment.yml` File
+## Step 2: Create an `env.yml` File
 
-Create an `environment.yml` file in your project directory with the following content:
+Create an `env.yml` file in your project directory with the following content:
 
 ```yaml
 name: optimization-env
@@ -40,7 +40,7 @@ conda env create -f environment.yml
 Activate the new environment:
 
 ```bash
-conda activate optimization-env
+conda activate <this-env>
 ```
 
 To check the packages installed in the active environment, run the following command:
@@ -59,7 +59,8 @@ conda deactivate
 
 ## Step 6: Managing Dependencies
 
-- **To add a new package**: `conda install package-name` or update `environment.yml` and run `conda env update -f environment.yml`.
+- **To add a new package**: `conda install package-name`
+  - Or update `environment.yml` and run `conda env update -f environment.yml`.
 - **To update a package**: `conda update package-name`.
 - **To remove a package**: `conda remove package-name`.
 
@@ -75,7 +76,7 @@ conda deactivate
 To share or recreate your environment:
 
 ```bash
-conda env export > environment.yml
+conda env export > env.yml
 ```
 
 ## Step 9: Removing the Environment
@@ -83,7 +84,7 @@ conda env export > environment.yml
 If you no longer need the environment:
 
 ```bash
-conda env remove -n optimization-env
+conda env remove -n <this-env>
 ```
 
 Remember to activate your environment each time you work on this project to ensure you are using the correct dependencies.
