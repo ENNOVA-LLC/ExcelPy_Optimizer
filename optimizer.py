@@ -311,19 +311,20 @@ class Excel_Solver:
         for i, xi in zip(self.x_param['indices'], x):
             self.xw.ranges['rg_x'](s['val'], i+2).value = xi
     
-    def _get_objective(self, objective_type:str)->dict or float:
+    def _get_objective(self, objective_type:str, return_type=dict)->dict|float:
         """Read value from objective cell."""
         s = self._PARAM_MAP
         if objective_type == 'default':
             f = self.xw.ranges['rg_x'].value[s['obj']-1]
             c = 1 # Assuming the objective value is in col=1
-            return dict(f=f[c], error=f[c+1], penalty=f[c+2]) 
+            result = dict(f=f[c], error=f[c+1], penalty=f[c+2]) 
         else:
             # read x, y, y*
             data = self.rg_obj
             # gpt: read {x,y,y*} from `data`
             # set 1 is in col{x=1,y=2,y*=3}, 2 is in col{x=4,y=5,y*=6} and so on. 
-            
+        return result if return_type is dict else result['f']
+    
     def _objective_function(self, x, objective_type="default", write_to_storage=True)->float:
         """Reads value of objective from `Solve_Knobs` range.
 
@@ -351,10 +352,11 @@ class Excel_Solver:
             f, error, penalty = obj['f'], obj['error'], obj['penalty']
         else:
             f, error, penalty = obj, None, None
-        self.solution['nfev'] += 1  #increment nfev counter
         # store solution
+        self.solution['nfev'] += 1  #increment nfev counter
         eps = self.solution['storage_tol']
         if write_to_storage and eps is not None and (f < eps or (error is not None and error < eps)):
+            self.solution['nSolutions'] += 1
             self.solution['f'].append(f)
             self.solution['error'].append(error)
             self.solution['penalty'].append(penalty)
@@ -432,9 +434,9 @@ class Excel_Solver:
         # There are too many details to handle to make this method work with all the different optimization algorithms. Give the user a method for getting the default `kwargs` for a 
         # particular method and then they can modify those `kwargs` how they see fit and then deal with any errors thrown by the optimization algorithms.
         if not opt_kwargs:
-            opt_kwargs = self.algo_param['param'] # algorithm parameters
+            opt_kwargs = self.algo_param['param']       # Algorithm parameters
         else:
-            opt_kwargs.update(self.algo_param['param'])  # Combine with additional kwargs, if any
+            opt_kwargs.update(self.algo_param['param']) # Combine with additional kwargs, if any
         bounds = opt_kwargs.get('bounds', None)
         opt_kwargs = self._filter_kwargs(method, opt_kwargs)
 
@@ -556,30 +558,40 @@ class Excel_Solver:
 
         # Store results in `solution` dict
         f = self.solution['f']
-        self.solution['nSolutions'] = len(f)
-        self.solution['idx_min'] = f.index(min(f))
         self.solution['result'] = result
+        self.solution['nSolutions'] = len(f)
+        if self.solution['nSolutions'] > 0:
+            idx_min = f.index(min(f))
+            self.solution['idx_min'] = idx_min   
         
         # Update the optimized values in the Excel sheet
         if result is not None:
             x = result.x
-        elif self.solution['nSolutions'] > 0:
-            x = self.solution['x'][f.index(min(f))]
+        elif idx_min > 0:
+            x = self.solution['x'][idx_min]
         else:
             x = opt_kwargs['x0']
         self._objective_function(x, *args)
         return result
     
     # region - writing to Excel sheet
-    def write_solution_to_solver_range(self, idx:int, isPrint=True)->None:
+    def _get_index_of_min_objective(self)->int:
+        """Returns the index of the minimum of the objective function."""
+        f = self.solution['f']
+        return f.index(min(f))
+
+    def write_solution_to_solver_range(self, idx:int=None, isPrint=True)->None:
         """Write x[idx] to the Excel solver range.
         
         Parameters
         ----------
         idx : int or array-like[int]
             idx of the `solution['x']` attribute to print to Excel range.
+            if None, then `idx` will correspond to `min(solution['f'])`.
         """
         # Ensure idx is a list for uniform processing
+        if idx is None:
+            idx = self._get_index_of_min_objective()
         if not isinstance(idx, (list, tuple, np.ndarray)):
             idx = [idx]
             
