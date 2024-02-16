@@ -145,6 +145,7 @@ dmypy.json
 # untracked files and folders (append file name with "-u" to mark as untracked)
 *-u.*
 *-u/
+*_u.*
 untracked/
 /untracked
 /data

@@ -41,7 +41,7 @@ Key *attributes* include:
 
 - `xw`: xlwings references to the Excel `book`, `sheet` and `ranges`.
 - `x_param:dict`: The decision variables to be tuned; includes keys `{'param', 'min', 'max', 'val', 'obj'}`.
-- `algo_param:dict`: The algorithm parameters that govern the chosen `scipy.optimize` method.
+- `algo_param:dict`: The algorithm parameters that govern the chosen `scipy.optimize()` method.
 - `solutions:dict`: Stores the candidate solutions; includes keys `{'result', 'nfev', 'storage_tol', 'f', 'error', 'x'}`
   - `nfev` counts the total calls to the objective function method.
   - if `f(x) < storage_tol` then solution set `{f, error, x}` is stored as an element in a list.
