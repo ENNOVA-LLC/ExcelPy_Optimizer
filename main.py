@@ -10,8 +10,13 @@ Instructions
 2. Define script path.
     - Set `run_method` which specifies the the `run_settings` dict. 
     - This defines which operations in the script are executed.
-3. Perform operations.
-    - This happens automatically given the `run_settings` dict.
+3. Run this script.
+    - The following operations are executed given the `run_settings` dict.
+        - a. Run or Load `solver` instance.
+        - b. Print candidate solutions to `solution` sheet.
+        - c. Save `solver` instance to file.
+        - d. Copy figures to `solution` sheet.
+        - e. Write a specific solution to the solver range
 """
 import numpy as np
 from pathlib import Path
@@ -20,13 +25,14 @@ from utils.config import ROOT_DIR, DATA_DIR
 from utils.utils import make_list_range, get_solution_indices
 
 # Step 1: Import simulation settings
-from specs.main_MP561_M9_u import specs
+from specs.MP561_u import specs_M10 as specs
+#from specs.Tiberius_u import specs_FL10 as specs
 
 # Step 2: Define script path
 # the `run_settings` dict specifies which operations in the script are executed
-run_method = 'figure'
+run_method = 'solver'
 run_settings = {
-    "solver": dict(isRunSolver=False, isPrintSolutions=True, isSaveInstance=True, isCopyFigs=False),
+    "solver": dict(isRunSolver=True, isPrintSolutions=True, isSaveInstance=True, isCopyFigs=False),
     "figure": dict(isRunSolver=False, isPrintSolutions=False, isSaveInstance=False, isCopyFigs=True),
     "write_solution": dict(isRunSolver=False, isPrintSolutions=False, isSaveInstance=False, isCopyFigs=False, isWriteSolution=True)
 }
@@ -54,25 +60,28 @@ else:
 # print optimization results
 print(f"optimization result: {solver.solution['result']}")
 
-# 3b) print candidate solutions to sheet and write figures
+# 3b) Print candidate solutions to sheet
 if run_settings['isPrintSolutions']:
     solver.print_solutions(sheet_name=specs.get('solution_sheet'))
 
-# 3c) save instance to file
+# 3c) Save instance to file
 if run_settings['isSaveInstance']:
     file_name = specs.get('file_name')
     file_path = DATA_DIR / file_name if file_name is not None else None
     solver.to_file(file_path)
     
-# 3d) copy figures to `solution` sheet
+# 3d) Copy figures to `solution` sheet
 if run_settings['isCopyFigs']:
-    idx_list = None #make_list_range([(5503, 5507), (5557, 5562), (5585, 5588)])
     tol = excel_fig_dict.pop('tol', None)
-    solver.copy_figure_to_solution_sheet(solution_tol=tol, idx_list=None, excel_dict=excel_fig_dict)
+    if tol is not None:
+        idx_list = get_solution_indices(solver.solution['f'], solution_tol=tol)
+    else:
+        idx_list = excel_fig_dict.pop('idx_list', None) #make_list_range([(5503, 5507), (5557, 5562), (5585, 5588)])
+    solver.copy_figure_to_solution_sheet(solution_tol=tol, idx_list=idx_list, excel_dict=excel_fig_dict)
 
-# 3e) write a specific solution to the solver range
+# 3e) Write a specific solution to the solver range
 if run_settings.get('isWriteSolution', False):
-    idx_list = get_solution_indices(solver.solution['f'], solution_tol=tol)
-    solver.write_solution_to_solver_range(idx=None)
+    idx = excel_fig_dict.get('solution_idx', None)
+    solver.write_solution_to_solver_range(idx=idx)
     
 print(f"{Path(__file__).parent.name}/{Path(__file__).name} complete!")

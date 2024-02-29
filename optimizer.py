@@ -1,6 +1,6 @@
 """ Optimizes the parameters in the `pySolve_Param` range.
 
-This class uses the `scipy.optimize` library to optimize the parameters
+The `optimizer.Excel_Solver` class uses the `scipy.optimize` library to optimize the parameters
 specified in the `pySolve_Param` Excel range. `pySolve_Param` must adhere to a specific format
 (shown in the `Notes` section) to be used with this class.
 
@@ -26,6 +26,8 @@ Notes
     [4]: max        -> max bound on parameter
     [5]: obj        -> value of objective function
 - The `pySolve_Algo` range holds the hyperparameters for the chosen optimization algorithm. 
+- Refer to the `optimizer_demo.xlsx` file for an example of proper range formatting.
+
 Refer to the `_OPT_KWARGS` attribute to see the default values for the hyperparameters.
 """
 import time
@@ -43,9 +45,27 @@ from utils.file_excel import rg_to_dict, get_book
 from utils.json import cls_to_json, json_to_cls
 from utils.file_excel import XW
 from utils.config import ROOT_DIR, DATA_DIR
-    
+
+# UTILITY functions
+import pywintypes
+
+def robust_excel_command(command_func, max_retries=5, delay=1, last_delay=5):
+    """Attempts to execute an Excel command with retries on com_error."""
+    delays = [delay] * max_retries
+    if last_delay is not None:
+        delays += [last_delay]
+    for i, delay in enumerate(delays):
+        try:
+            return command_func()
+        except pywintypes.com_error as e:
+            print(f"COM error encountered. Attempt {i + 1}/{max_retries}. Retrying in {delay} seconds...")
+            time.sleep(delay)
+    # Final attempt outside of loop to raise the exception if it fails
+    return command_func()
+
 class Excel_Solver:
     """ 
+    # Excel-based Optimization Solver
     Solves an optimization problem set up in Excel using the `scipy.optimize` library.
     
     Optimization methods: https://docs.scipy.org/doc/scipy/reference/optimize.html
@@ -115,7 +135,7 @@ class Excel_Solver:
         algo_param : dict
             Hyperparameters for the optimization algorithm
         solution : dict
-            Contains results from the optimization.
+            Optimization results.
         
         Private Attributes
         ------------------
@@ -142,7 +162,7 @@ class Excel_Solver:
             raise ValueError("No active parameters found in the `param_rg_name` range.")
         
         # outputs from `self.optimize()` method
-        self.solution = dict(result=None, nfev=0, storage_tol=None, nSolutions=None, idx_min=None,
+        self.solution = dict(result=None, nfev=0, storage_tol=None, n_solutions=0, idx_min=None,
                              f=[], x=[], error=[], penalty=[], sheet=kwargs.get('solution_sheet', 'OptimizeResult'))   # storage for solutions (result, f(x), x)
         self.solution['storage_tol'] = kwargs.get('storage_tol', self.algo_param['param'].pop('storage_tol', None))
         
@@ -341,12 +361,19 @@ class Excel_Solver:
         if self._is_terminate_optimization(self._solver_admin['check_file']):
             self._solver_admin['terminate_optimization'] = True
             return float(np.inf)
-        # Pass active `x` to Excel solver range
-        self.xw.app.calculation = 'manual'
-        self._pass_x_to_solver(x)
-        self.xw.app.calculate()
-        self.xw.app.calculation = 'automatic'
-        # read or evaluate objective
+        try:
+            # Pass active `x` to Excel solver range
+            robust_excel_command(lambda: setattr(self.xw.app, 'calculation', 'manual'))
+            self.xw.app.calculation = 'manual'
+            self._pass_x_to_solver(x)
+            robust_excel_command(lambda: self.xw.app.calculate())
+            #time.sleep(0.1)  # Add a delay (s) to ensure Excel has time to finish calculating
+            robust_excel_command(lambda: setattr(self.xw.app, 'calculation', 'automatic'))
+        except pywintypes.com_error as e:
+            print()
+            raise e
+        
+        # read or evaluate objective (f=objective, error=err(y, ys), penalty=constraint violations)
         obj = self._get_objective(objective_type)
         if isinstance(obj, dict):
             f, error, penalty = obj['f'], obj['error'], obj['penalty']
@@ -356,7 +383,7 @@ class Excel_Solver:
         self.solution['nfev'] += 1  #increment nfev counter
         eps = self.solution['storage_tol']
         if write_to_storage and eps is not None and (f < eps or (error is not None and error < eps)):
-            self.solution['nSolutions'] += 1
+            self.solution['n_solutions'] += 1
             self.solution['f'].append(f)
             self.solution['error'].append(error)
             self.solution['penalty'].append(penalty)
@@ -559,8 +586,8 @@ class Excel_Solver:
         # Store results in `solution` dict
         f = self.solution['f']
         self.solution['result'] = result
-        self.solution['nSolutions'] = len(f)
-        if self.solution['nSolutions'] > 0:
+        self.solution['n_solutions'] = len(f)
+        if self.solution['n_solutions'] > 0:
             idx_min = f.index(min(f))
             self.solution['idx_min'] = idx_min   
         
@@ -629,7 +656,8 @@ class Excel_Solver:
         isPrint : bool
             If True, prints the solution info to the console
         """
-        def copy_fig(fig_dict:dict, max_retries=3, sleep_interval=5.0)->None:
+        def copy_fig(fig_dict:dict, max_retries:int=3, sleep_interval:float=5.0)->None:
+            """Create a copy of the figure referenced by `fig_dict`."""
             for i in range(max_retries):
                 try:
                     fig = fig_dict['fig']
@@ -660,8 +688,8 @@ class Excel_Solver:
         else:
             raise ValueError("Either `solution_tol` or `idx_list` must be provided.")
 
-        # get `solution_sheet` and `to_cell` info
-        # `solution` sheet can be in a separate workbook, must provide excel_dict['book'] if so
+        # `sol_dict` holds reference to `sol['sheet']`, `to_cell` info
+        # `sol['sheet']` can be in a separate workbook, must provide excel_dict['book'] if so
         book = get_book(excel_dict.get('book', self.xw.book))
         solution_sheet = excel_dict.get('solution_sheet', self.solution.get('sheet', 'OptimizeResult'))
         if isinstance(solution_sheet, str):
@@ -670,7 +698,7 @@ class Excel_Solver:
             raise TypeError("`solution_sheet` must be of type `str` or `xw.Sheet`.")
         sol_dict = dict(sheet=solution_sheet, to_col=excel_dict.get('to_col', 'H'), to_row=excel_dict.get('to_row', 41))
         
-        # get `fig` object
+        # `fig_dict` holds reference to fig sheet, name of fig, and figure
         fig_sheet = excel_dict.get('fig_sheet', self.xw.book.api.ActiveSheet)
         fig_name = excel_dict.get('fig_name', 'Group 1')
         if isinstance(fig_sheet, str):
@@ -684,6 +712,7 @@ class Excel_Solver:
         if paste_type not in valid_paste_types:
             raise ValueError(f"Invalid `paste_type` value. Must be in set {valid_paste_types}. Got '{paste_type}' instead.")
         
+        # Loop over all `idx_list`, pass xs[i] to sheet, copy resultant figure, and paste using info from `sol_dict`.
         screen_updating = self.xw.app.screen_updating
         self.xw.app.screen_updating = True
         for idx, x in zip(idx_list, xs):            
@@ -696,7 +725,6 @@ class Excel_Solver:
             # Paste figure to destination cell
             to_cell = sol_dict['sheet'].range(f"{sol_dict['to_col']}{sol_dict['to_row']+idx}")
             if paste_type == 'image':
-                # this method is preferred
                 # creates a temp file, saves fig to file, writes fig to sheet, then deletes the temp file
                 temp_path = Path(tempfile.gettempdir()) / f'fig_{idx}.png'
                 img = ImageGrab.grabclipboard()
@@ -802,11 +830,11 @@ class Excel_Solver:
         ]
         # extract output from the `result` object
         f = sol['f']
-        sol['nSolutions'] = len(f)
-        sol['idx_min'] = f.index(min(f))
+        sol['n_solutions'] = len(f)
         
         # if `result` is None, then build `result` from `sol` object
-        if sol['nSolutions'] > 0:
+        if sol['n_solutions'] > 0:
+            sol['idx_min'] = f.index(min(f))
             i = sol['idx_min']
             f_min, e_min, x_min = sol['f'][i], sol['error'][i], sol['x'][i]
         else:
@@ -841,10 +869,10 @@ class Excel_Solver:
             sheet.range(f"A{i}").value = row_data
 
         # Write the candidate solutions (header, active params, f(x), x)
-        if sol['nSolutions'] > 0:
+        if sol['n_solutions'] > 0:
             data = [
                 ["solutions:", f"all candidate `x` that yield `f(x) < {sol.get('storage_tol', 'storage_tol')}`."],
-                ["nSolutions:", sol['nSolutions']],
+                ["n_solutions:", sol['n_solutions']],
                 ["idx", "objective", "error", "parameters (indices / names / values)"],
                 ["", "", ""] + self.x_param['indices'],
                 ["", "f(x)", "err(x)"] + self.x_param['param']
@@ -945,4 +973,3 @@ class Excel_Solver:
 # SCRIPT
 if __name__ == "__main__":
     print("This module holds the class `Excel_Solver`. To see this class in use, refer to the file `main.py`.")
-    print(f"{Path(__file__).parent.name}/{Path(__file__).name} complete!")
