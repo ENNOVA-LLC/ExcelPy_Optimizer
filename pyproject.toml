@@ -1,0 +1,32 @@
+[tool.poetry]
+name = "excelpy_optimizer"
+version = "0.4.0"
+description = "Excel Solver for Optimization using scipy.optimize and xlwings"
+authors = ["Caleb Sisco <caleb.sisco11@gmail.com>"]
+readme = "README.md"
+packages = [
+    { include = "excelpy_optimizer", from = "src" }
+]
+
+[tool.poetry.dependencies]
+python = "^3.11"
+numpy = "*"
+scipy = "*"
+scikit-learn = "*"
+pandas = "*"
+dill = "*"
+xlwings = "*"
+jupyter = "*"
+ipython = "*"
+matplotlib = "*"
+seaborn = "*"
+plotly = "*"
+dash = "*"
+numba = "*"
+
+[tool.poetry.dev.dependencies]
+pytest = "*"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"

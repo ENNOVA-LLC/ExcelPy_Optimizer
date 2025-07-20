@@ -1,4 +1,6 @@
-""" Optimizes the parameters in the `pySolve_Param` range.
+""" `optimizer`
+
+Optimizes the parameters in the `pySolve_Param` range.
 
 The `optimizer.Excel_Solver` class uses the `scipy.optimize` library to optimize the parameters
 specified in the `pySolve_Param` Excel range. `pySolve_Param` must adhere to a specific format
@@ -41,10 +43,9 @@ from pathlib import Path
 import numpy as np
 from scipy.optimize import minimize, basinhopping, brute, differential_evolution, shgo, dual_annealing, direct
 from scipy.optimize import OptimizeResult, show_options
-from utils.file_excel import rg_to_dict, get_book
-from utils.json import cls_to_json, json_to_cls
-from utils.file_excel import XW
-from utils.config import ROOT_DIR, DATA_DIR
+from .utils.file_excel import rg_to_dict, get_book
+from .utils.json import cls_to_json, json_to_cls
+from .utils.file_excel import XW
 
 # UTILITY functions
 import pywintypes

@@ -11,7 +11,7 @@ Functions:
 import json
 from pathlib import Path
 import numpy as np
-from utils.file_excel import XW
+from .file_excel import XW
 
 def _serialize(data, black_list=None):
     """Serializes `data` input to comply with JSON formatting."""

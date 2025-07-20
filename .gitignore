@@ -149,3 +149,4 @@ dmypy.json
 untracked/
 /untracked
 /data
+/scripts

@@ -1,8 +1,8 @@
-name: optimization-env
+name: excelOpt_env
 channels:
   - defaults
 dependencies:
-  - python=3.11  # or any version you prefer
+  - python=3.11
   - numpy
   - scipy
   - scikit-learn
