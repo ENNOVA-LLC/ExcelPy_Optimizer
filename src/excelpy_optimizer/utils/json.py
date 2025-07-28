@@ -74,6 +74,7 @@ def cls_to_json(instance, file_name:str or Path, indent=4, black_list:list[str]=
     """
     with open(file_name, 'w', encoding='utf-8') as f:
         data = _serialize(instance.__dict__, black_list)
+        data.pop('external_objective', None)  # Remove function object from serialization
         json.dump(data, f, indent=indent)
 
 def json_to_cls(cls, file_name:str or Path):

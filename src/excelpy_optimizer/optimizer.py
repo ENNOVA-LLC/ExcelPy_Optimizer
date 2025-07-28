@@ -87,28 +87,33 @@ class Excel_Solver:
     _OPT_METHODS = {
         'global': ['basinhopping', 'brute', 'differential_evolution', 'shgo', 'dual_annealing', 'direct'],
         'local': ['Nelder-Mead', 'Powell', 'CG', 'BFGS', 'Newton-CG', 'L-BFGS-B', 
-                  'TNC', 'COBYLA', 'SLSQP', 'trust-constr', 'dogleg', 'trust-ncg', 'trust-exact', 'trust-krylov']
-        }
+            'TNC', 'COBYLA', 'SLSQP', 'trust-constr', 'dogleg', 'trust-ncg', 'trust-exact', 'trust-krylov'
+        ]
+    }
     # default hyperparameters for all `scipy.optimize` methods
     _OPT_KWARGS = {
         'minimize': dict(x0=None, method=None, jac=None, hess=None, hessp=None, bounds=None, constraints=(), tol=None, callback=None, options=None),
         'basinhopping': dict(x0=None, niter=100, T=1.0, stepsize=0.5, minimizer_kwargs=None, take_step=None, accept_test=None, callback=None, interval=50, 
-                             disp=False, niter_success=None, seed=None, target_accept_rate=0.5, stepwise_factor=0.9),
+            disp=False, niter_success=None, seed=None, target_accept_rate=0.5, stepwise_factor=0.9
+        ),
         'brute': dict(ranges=None, Ns=20, full_output=0, finish=None, disp=False, workers=1),
         'differential_evolution': dict(bounds=None, strategy="best1bin", maxiter=1000, popsize=15, tol=0.01, mutation=(0.5, 1), recombination=0.7, 
-                                       seed=None, callback=None, disp=False, polish=True, init='latinhypercube', atol=0, updating='immediate',
-                                       workers=1, constraints=(), x0=None, integrality=None, vectorized=False),
+            seed=None, callback=None, disp=False, polish=True, init='latinhypercube', atol=0, updating='immediate',
+            workers=1, constraints=(), x0=None, integrality=None, vectorized=False
+        ),
         'shgo': dict(bounds=None, constraints=None, n=100, iters=1, callback=None, minimizer_kwargs=None, options=None, sampling_method='simplicial', workers=1),
         'dual_annealing': dict(bounds=None, maxiter=1000, minimizer_kwargs=None, initial_temp=5230.0, restart_temp_ratio=2e-05, visit=2.62, accept=-5.0, maxfun=10000000.0, 
-                               seed=None, no_local_search=False, callback=None, x0=None),
-        'direct': dict(bounds=None, eps=0.0001, maxfun=None, maxiter=1000, locally_biased=True, 
-                       f_min=-np.inf, f_min_rtol=0.0001, vol_tol=1e-16, len_tol=1e-06, callback=None),
+            seed=None, no_local_search=False, callback=None, x0=None
+        ),
+        'direct': dict(bounds=None, eps=0.0001, maxfun=None, maxiter=1000, locally_biased=True, f_min=-np.inf, f_min_rtol=0.0001, vol_tol=1e-16, len_tol=1e-06, callback=None),
         'options': dict(maxfev=None, f_min=None, f_tol=None, maxiter=None, maxev=None, maxtime=None, minhgrdint=None, symmetry=None),
     }
     
     # region - init
-    def __init__(self, book:Path, sheet_name:str="project", param_rg_name:str="pySolve_Param", algo_rg_name:str="pySolve_Algo",
-                 objective_dict:dict=None, **kwargs)->None:
+    def __init__(self, 
+        book:Path, sheet_name:str="project", param_rg_name:str="pySolve_Param", algo_rg_name:str="pySolve_Algo",
+        objective_dict:dict=None, external_objective: callable=None, **kwargs
+    )->None:
         """
         Initializes an instance of the class.
 
@@ -124,6 +129,8 @@ class Excel_Solver:
             The name of the "settings" range in the worksheet. Defaults to "pySolve_Algo".
         objective_dict : dict, optional
             The objective function dictionary, keys('sheet', 'rg'). Defaults to None.
+        external_objective : callable, optional
+            The external objective function. Defaults to None.
             
         Attributes
         ----------
@@ -164,11 +171,13 @@ class Excel_Solver:
         
         # outputs from `self.optimize()` method
         self.solution = dict(result=None, nfev=0, storage_tol=None, n_solutions=0, idx_min=None,
-                             f=[], x=[], error=[], penalty=[], sheet=kwargs.get('solution_sheet', 'OptimizeResult'))   # storage for solutions (result, f(x), x)
+            f=[], x=[], error=[], penalty=[], sheet=kwargs.get('solution_sheet', 'OptimizeResult')
+        )   # storage for solutions (result, f(x), x)
         self.solution['storage_tol'] = kwargs.get('storage_tol', self.algo_param['param'].pop('storage_tol', None))
         
         # f(x), custom objective
         self._xw_f_custom = XW(book, objective_dict['sheet'], [objective_dict['rg']], ['rg']) if objective_dict else None
+        self.external_objective = external_objective
     
     # INIT auxiliary methods
     def init_param(self, **kwargs)->None:
@@ -375,11 +384,18 @@ class Excel_Solver:
             raise e
         
         # read or evaluate objective (f=objective, error=err(y, ys), penalty=constraint violations)
-        obj = self._get_objective(objective_type)
-        if isinstance(obj, dict):
-            f, error, penalty = obj['f'], obj['error'], obj['penalty']
+        if self.external_objective is not None:
+                # Call the user-supplied function directly
+                f = self.external_objective(x)
+                error = None
+                penalty = None
         else:
-            f, error, penalty = obj, None, None
+            obj = self._get_objective(objective_type)
+            if isinstance(obj, dict):
+                f, error, penalty = obj['f'], obj['error'], obj['penalty']
+            else:
+                f, error, penalty = obj, None, None
+        
         # store solution
         self.solution['nfev'] += 1  #increment nfev counter
         eps = self.solution['storage_tol']
