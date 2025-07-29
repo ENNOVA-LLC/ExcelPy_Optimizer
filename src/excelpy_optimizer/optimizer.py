@@ -858,8 +858,11 @@ class Excel_Solver:
             f_min = e_min = x_min = None
             
         if result is None and f_min is not None:
-            result = dict(fun=f_min, x=x_min, message='`result` object constructed in post-processing', 
-                          success=False, nfev=None, nit=None)
+            result = dict(
+                fun=f_min, x=x_min, 
+                message='`result` object constructed in post-processing', 
+                success=False, nfev=None, nit=None
+            )
         
         try:
             x_list = result['x'].tolist() if 'x' in result and result['x'] is not None else ['N/A']
@@ -880,27 +883,34 @@ class Excel_Solver:
             ]
         data += data_result
 
-        # Write `data` to Excel sheet
-        self.xw.app.screen_updating = False
-        for i, row_data in enumerate(data, start=1):
-            sheet.range(f"A{i}").value = row_data
-
         # Write the candidate solutions (header, active params, f(x), x)
         if sol['n_solutions'] > 0:
-            data = [
+            solutions_header  = [
                 ["solutions:", f"all candidate `x` that yield `f(x) < {sol.get('storage_tol', 'storage_tol')}`."],
                 ["n_solutions:", sol['n_solutions']],
                 ["idx", "objective", "error", "parameters (indices / names / values)"],
                 ["", "", ""] + self.x_param['indices'],
                 ["", "f(x)", "err(x)"] + self.x_param['param']
             ]
-            data += [
-                [i, f, e] + x.tolist() for i, (f, e, x) in enumerate(zip(sol['f'], sol['error'], sol['x']))
+            solutions_rows = [
+                [i, f, e] + (x.tolist() if hasattr(x, "tolist") else list(x))
+                for i, (f, e, x) in enumerate(zip(sol['f'], sol['error'], sol['x']))
             ]
-            # Write `data` to Excel sheet
-            for i, row_data in enumerate(data, start=i+2):
-                sheet.range(f"A{i}").value = row_data
+            data += solutions_header + solutions_rows
+        
+        # Write `data` to Excel sheet
+        self.xw.app.screen_updating = False
+        calc_backup = self.xw.app.calculation
+        self.xw.app.calculation = 'manual'  # Set calculation mode to manual to prevent Excel from recalculating during data writing
+        
+        # Find the max number of columns in any row
+        max_len = max(len(row) for row in data)
+        # Pad all rows to max_len
+        data = [row + [""] * (max_len - len(row)) for row in data]
+        sheet.range("A1").value = data
+        
         self.xw.app.screen_updating = True
+        self.xw.app.calculation = calc_backup
 
         # Apply `kwargs` to format `sheet`
         if kwargs.get('autofit', False):
